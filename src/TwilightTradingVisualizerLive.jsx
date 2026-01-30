@@ -414,24 +414,150 @@ const TwilightTradingVisualizerLive = () => {
       }
 
       // ===================
-      // TOTAL P&L
+      // TOTAL P&L (Funding Only - Flat Price)
       // ===================
 
       const monthlyFundingPnL = dailyFundingPnL * 30;
-      const monthlyPnL = basisProfit + monthlyFundingPnL - totalFees;
-      const dailyPnL = monthlyPnL / 30;
+      const monthlyPnLFlat = basisProfit + monthlyFundingPnL - totalFees;
+      const dailyPnL = monthlyPnLFlat / 30;
 
       // Break-even: days until fees are covered by funding
       const breakEvenDays = dailyFundingPnL > 0 ? Math.ceil(totalFees / dailyFundingPnL) : Infinity;
 
-      // APY calculation based on total capital deployed
-      const monthlyROI = (monthlyPnL / totalMarginUSD) * 100;
+      // ===================
+      // PRICE MOVEMENT SCENARIOS
+      // ===================
+
+      // Calculate P&L at different price movements (+5%, -5%, +10%, -10%)
+      const priceMovements = [0.05, -0.05, 0.10, -0.10]; // 5%, -5%, 10%, -10%
+
+      // For leveraged positions:
+      // Long P&L = priceChange × leverage × positionSize
+      // Short P&L = -priceChange × leverage × positionSize
+
+      const calculatePricePnL = (priceChangePct) => {
+        const newBtcPrice = btcPrice * (1 + priceChangePct);
+
+        let twilightPricePnL = 0;
+        let binancePricePnL = 0;
+        let marginValueChange = 0;
+
+        // ===================
+        // TWILIGHT (INVERSE PERP) - BTC-margined
+        // ===================
+        // 1. Position P&L from price movement (settled in BTC, converted to USD)
+        // 2. PLUS: Margin value change (BTC margin changes USD value)
+        if (twilightPosition === 'LONG') {
+          // Position P&L: Long profits when price goes up
+          // For inverse perp: PnL(BTC) = contracts * (1/entry - 1/exit)
+          // Simplified: PnL ≈ positionSize * priceChange% (in USD terms)
+          twilightPricePnL = priceChangePct * twilightLeverage * twilightMarginUSD;
+
+          // Margin value change: BTC margin now worth different USD amount
+          // marginBTC * newPrice - marginBTC * oldPrice = marginBTC * priceChange
+          marginValueChange += twilightMarginBTC * (newBtcPrice - btcPrice);
+        } else if (twilightPosition === 'SHORT') {
+          // Short profits when price goes down
+          twilightPricePnL = -priceChangePct * twilightLeverage * twilightMarginUSD;
+
+          // Margin still changes value even for shorts
+          marginValueChange += twilightMarginBTC * (newBtcPrice - btcPrice);
+        }
+
+        // ===================
+        // BINANCE (LINEAR PERP) - USDT-margined
+        // ===================
+        // Position P&L from price movement (settled in USDT)
+        // No margin value change - USDT stays at $1
+        if (binancePosition === 'LONG') {
+          binancePricePnL = priceChangePct * binanceLeverage * binanceMarginUSDT;
+        } else if (binancePosition === 'SHORT') {
+          binancePricePnL = -priceChangePct * binanceLeverage * binanceMarginUSDT;
+        }
+
+        // Net position P&L (without margin value change)
+        const netPositionPnL = twilightPricePnL + binancePricePnL;
+
+        // Total price-related P&L includes margin value change
+        const netPricePnL = netPositionPnL + marginValueChange;
+
+        // Total P&L = Price P&L + Margin Change + Basis Capture + Funding P&L (30 days) - Fees
+        const totalPricePnL = netPricePnL + basisProfit + monthlyFundingPnL - totalFees;
+
+        return {
+          total: totalPricePnL,
+          priceOnly: netPricePnL,
+          positionPnL: netPositionPnL,
+          marginChange: marginValueChange
+        };
+      };
+
+      const pnlUp5Result = calculatePricePnL(0.05);
+      const pnlDown5Result = calculatePricePnL(-0.05);
+      const pnlUp10Result = calculatePricePnL(0.10);
+      const pnlDown10Result = calculatePricePnL(-0.10);
+
+      const pnlUp5 = pnlUp5Result.total;
+      const pnlDown5 = pnlDown5Result.total;
+      const pnlUp10 = pnlUp10Result.total;
+      const pnlDown10 = pnlDown10Result.total;
+
+      // Price-only P&L (includes position P&L + margin value change)
+      const priceOnlyUp5 = pnlUp5Result.priceOnly;
+      const priceOnlyDown5 = pnlDown5Result.priceOnly;
+      const priceOnlyUp10 = pnlUp10Result.priceOnly;
+      const priceOnlyDown10 = pnlDown10Result.priceOnly;
+
+      // Margin value change (BTC margin appreciates/depreciates with price)
+      const marginChangeUp5 = pnlUp5Result.marginChange;
+      const marginChangeDown5 = pnlDown5Result.marginChange;
+      const marginChangeUp10 = pnlUp10Result.marginChange;
+      const marginChangeDown10 = pnlDown10Result.marginChange;
+
+      // Determine market direction this strategy is best for
+      let marketDirection = 'NEUTRAL';
+      let directionDescription = '';
+
+      if (twilightPosition && binancePosition && twilightPosition !== binancePosition) {
+        // Hedged/Delta-neutral
+        marketDirection = 'NEUTRAL';
+        directionDescription = 'Profits from funding regardless of price direction. Best for sideways/ranging markets.';
+      } else if ((twilightPosition === 'LONG' && !binancePosition) ||
+                 (binancePosition === 'LONG' && !twilightPosition) ||
+                 (twilightPosition === 'LONG' && binancePosition === 'LONG')) {
+        marketDirection = 'BULLISH';
+        directionDescription = 'Profits when BTC price goes UP. Loses when price goes DOWN.';
+      } else if ((twilightPosition === 'SHORT' && !binancePosition) ||
+                 (binancePosition === 'SHORT' && !twilightPosition) ||
+                 (twilightPosition === 'SHORT' && binancePosition === 'SHORT')) {
+        marketDirection = 'BEARISH';
+        directionDescription = 'Profits when BTC price goes DOWN. Loses when price goes UP.';
+      }
+
+      // Calculate break-even price move needed (to cover funding costs if negative)
+      let breakEvenPriceMove = 0;
+      if (monthlyFundingPnL < 0) {
+        // Need price to move to cover funding losses
+        const totalLevMargin = (twilightPosition ? twilightLeverage * twilightMarginUSD : 0) +
+                               (binancePosition ? binanceLeverage * binanceMarginUSDT : 0);
+        if (totalLevMargin > 0) {
+          // For longs: need price up, for shorts: need price down
+          breakEvenPriceMove = Math.abs(monthlyFundingPnL - totalFees) / totalLevMargin;
+        }
+      }
+
+      // APY calculation based on total capital deployed (flat price scenario)
+      const monthlyROI = (monthlyPnLFlat / totalMarginUSD) * 100;
       const apy = monthlyROI * 12;
+
+      // APY with +5% price move
+      const apyUp5 = ((pnlUp5 / totalMarginUSD) * 100) * 12;
+      const apyDown5 = ((pnlDown5 / totalMarginUSD) * 100) * 12;
 
       return {
         apy: isNaN(apy) ? 0 : apy,
         dailyPnL: isNaN(dailyPnL) ? 0 : dailyPnL,
-        monthlyPnL: isNaN(monthlyPnL) ? 0 : monthlyPnL,
+        monthlyPnL: isNaN(monthlyPnLFlat) ? 0 : monthlyPnLFlat,
         totalMargin: totalMarginUSD,
         twilightMarginBTC,
         twilightMarginUSD,
@@ -449,7 +575,27 @@ const TwilightTradingVisualizerLive = () => {
         binanceStopLoss,
         binanceStopLossPct,
         totalMaxLoss,
-        breakEvenDays: isFinite(breakEvenDays) ? breakEvenDays : null
+        breakEvenDays: isFinite(breakEvenDays) ? breakEvenDays : null,
+        // Price movement scenarios
+        marketDirection,
+        directionDescription,
+        pnlUp5,
+        pnlDown5,
+        pnlUp10,
+        pnlDown10,
+        // Price-only P&L (position P&L + margin value change)
+        priceOnlyUp5,
+        priceOnlyDown5,
+        priceOnlyUp10,
+        priceOnlyDown10,
+        // BTC margin value change (only for inverse perp positions)
+        marginChangeUp5,
+        marginChangeDown5,
+        marginChangeUp10,
+        marginChangeDown10,
+        apyUp5: isNaN(apyUp5) ? 0 : apyUp5,
+        apyDown5: isNaN(apyDown5) ? 0 : apyDown5,
+        breakEvenPriceMove: breakEvenPriceMove * 100 // Convert to percentage
       };
     };
 
@@ -881,8 +1027,11 @@ const TwilightTradingVisualizerLive = () => {
       <div className="bg-white rounded-lg p-4 shadow mb-6">
         <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
           <DollarSign className="w-5 h-5 text-green-600" />
-          All 20 Trading Strategies (Sorted by APY)
+          All 20 Trading Strategies
         </h3>
+        <p className="text-xs text-slate-500 mb-4">
+          APY shown assumes flat price. Click "Details" to see P&L at different price movements.
+        </p>
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -890,11 +1039,14 @@ const TwilightTradingVisualizerLive = () => {
               <tr className="border-b bg-slate-50">
                 <th className="text-left p-2">#</th>
                 <th className="text-left p-2">Strategy</th>
-                <th className="text-left p-2">Category</th>
+                <th className="text-center p-2">Category</th>
+                <th className="text-center p-2">Direction</th>
                 <th className="text-left p-2">Risk</th>
                 <th className="text-right p-2">Margin</th>
                 <th className="text-right p-2">Monthly P&L</th>
-                <th className="text-right p-2 font-bold">APY</th>
+                <th className="text-right p-2">APY</th>
+                <th className="text-right p-2 text-green-700">If +5%</th>
+                <th className="text-right p-2 text-red-700">If -5%</th>
                 <th className="text-center p-2">Action</th>
               </tr>
             </thead>
@@ -910,9 +1062,19 @@ const TwilightTradingVisualizerLive = () => {
                     <div className="font-medium text-slate-800">{strategy.name}</div>
                     <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
                   </td>
-                  <td className="p-2">
+                  <td className="p-2 text-center">
                     <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
                       {strategy.category}
+                    </span>
+                  </td>
+                  <td className="p-2 text-center">
+                    <span className={`px-2 py-1 rounded text-xs font-bold ${
+                      strategy.marketDirection === 'BULLISH' ? 'bg-green-500 text-white' :
+                      strategy.marketDirection === 'BEARISH' ? 'bg-red-500 text-white' :
+                      'bg-gray-500 text-white'
+                    }`}>
+                      {strategy.marketDirection === 'BULLISH' ? '↑ BULL' :
+                       strategy.marketDirection === 'BEARISH' ? '↓ BEAR' : '↔ NEUTRAL'}
                     </span>
                   </td>
                   <td className="p-2">
@@ -922,10 +1084,16 @@ const TwilightTradingVisualizerLive = () => {
                   </td>
                   <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
                   <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL.toFixed(2)}
+                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
                   </td>
-                  <td className={`p-2 text-right font-bold font-mono ${getAPYColor(strategy.apy)}`}>
-                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy.toFixed(1)}%
+                  <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
+                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
                   </td>
                   <td className="p-2 text-center">
                     <button
@@ -947,11 +1115,26 @@ const TwilightTradingVisualizerLive = () => {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedStrategy(null)}>
           <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             {/* Modal Header */}
-            <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white p-4 rounded-t-xl">
+            <div className={`p-4 rounded-t-xl ${
+              selectedStrategy.marketDirection === 'BULLISH' ? 'bg-gradient-to-r from-green-600 to-emerald-600' :
+              selectedStrategy.marketDirection === 'BEARISH' ? 'bg-gradient-to-r from-red-600 to-rose-600' :
+              'bg-gradient-to-r from-blue-600 to-purple-600'
+            } text-white`}>
               <div className="flex items-center justify-between">
                 <div>
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className={`px-3 py-1 rounded-full text-sm font-bold ${
+                      selectedStrategy.marketDirection === 'BULLISH' ? 'bg-white text-green-700' :
+                      selectedStrategy.marketDirection === 'BEARISH' ? 'bg-white text-red-700' :
+                      'bg-white text-gray-700'
+                    }`}>
+                      {selectedStrategy.marketDirection === 'BULLISH' ? '↑ BULLISH - Price Up' :
+                       selectedStrategy.marketDirection === 'BEARISH' ? '↓ BEARISH - Price Down' :
+                       '↔ NEUTRAL - Any Direction'}
+                    </span>
+                  </div>
                   <h2 className="text-xl font-bold">{selectedStrategy.name}</h2>
-                  <p className="text-blue-100 text-sm mt-1">{selectedStrategy.description}</p>
+                  <p className="text-white/80 text-sm mt-1">{selectedStrategy.directionDescription}</p>
                 </div>
                 <button
                   onClick={() => setSelectedStrategy(null)}
@@ -970,6 +1153,93 @@ const TwilightTradingVisualizerLive = () => {
                   {selectedStrategy.risk} RISK
                 </span>
               </div>
+            </div>
+
+            {/* PRICE SCENARIOS - KEY SECTION */}
+            <div className="p-4 bg-gradient-to-r from-slate-100 to-slate-200 border-b-4 border-slate-400">
+              <h3 className="font-bold text-slate-800 text-lg mb-3">
+                P&L at Different Price Movements (30 days)
+              </h3>
+              <div className="grid grid-cols-5 gap-2 text-center">
+                <div className="bg-red-100 rounded-lg p-3">
+                  <div className="text-red-600 text-xs font-semibold">If -10%</div>
+                  <div className={`text-xl font-bold ${selectedStrategy.pnlDown10 >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                    {selectedStrategy.pnlDown10 >= 0 ? '+' : ''}${selectedStrategy.pnlDown10?.toFixed(2) || '0'}
+                  </div>
+                  <div className={`text-xs ${selectedStrategy.priceOnlyDown10 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    Price: {selectedStrategy.priceOnlyDown10 >= 0 ? '+' : ''}${selectedStrategy.priceOnlyDown10?.toFixed(2) || '0'}
+                  </div>
+                  {selectedStrategy.marginChangeDown10 !== 0 && (
+                    <div className={`text-xs ${selectedStrategy.marginChangeDown10 >= 0 ? 'text-orange-600' : 'text-orange-600'}`}>
+                      BTC margin: {selectedStrategy.marginChangeDown10 >= 0 ? '+' : ''}${selectedStrategy.marginChangeDown10?.toFixed(2) || '0'}
+                    </div>
+                  )}
+                </div>
+                <div className="bg-red-50 rounded-lg p-3">
+                  <div className="text-red-500 text-xs font-semibold">If -5%</div>
+                  <div className={`text-xl font-bold ${selectedStrategy.pnlDown5 >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                    {selectedStrategy.pnlDown5 >= 0 ? '+' : ''}${selectedStrategy.pnlDown5?.toFixed(2) || '0'}
+                  </div>
+                  <div className={`text-xs ${selectedStrategy.priceOnlyDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    Price: {selectedStrategy.priceOnlyDown5 >= 0 ? '+' : ''}${selectedStrategy.priceOnlyDown5?.toFixed(2) || '0'}
+                  </div>
+                  {selectedStrategy.marginChangeDown5 !== 0 && (
+                    <div className={`text-xs ${selectedStrategy.marginChangeDown5 >= 0 ? 'text-orange-600' : 'text-orange-600'}`}>
+                      BTC margin: {selectedStrategy.marginChangeDown5 >= 0 ? '+' : ''}${selectedStrategy.marginChangeDown5?.toFixed(2) || '0'}
+                    </div>
+                  )}
+                </div>
+                <div className="bg-gray-100 rounded-lg p-3 border-2 border-gray-300">
+                  <div className="text-gray-600 text-xs font-semibold">Flat (0%)</div>
+                  <div className={`text-xl font-bold ${selectedStrategy.monthlyPnL >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                    {selectedStrategy.monthlyPnL >= 0 ? '+' : ''}${selectedStrategy.monthlyPnL?.toFixed(2) || '0'}
+                  </div>
+                  <div className="text-xs text-gray-500">Funding only</div>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3">
+                  <div className="text-green-500 text-xs font-semibold">If +5%</div>
+                  <div className={`text-xl font-bold ${selectedStrategy.pnlUp5 >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                    {selectedStrategy.pnlUp5 >= 0 ? '+' : ''}${selectedStrategy.pnlUp5?.toFixed(2) || '0'}
+                  </div>
+                  <div className={`text-xs ${selectedStrategy.priceOnlyUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    Price: {selectedStrategy.priceOnlyUp5 >= 0 ? '+' : ''}${selectedStrategy.priceOnlyUp5?.toFixed(2) || '0'}
+                  </div>
+                  {selectedStrategy.marginChangeUp5 !== 0 && (
+                    <div className={`text-xs ${selectedStrategy.marginChangeUp5 >= 0 ? 'text-orange-600' : 'text-orange-600'}`}>
+                      BTC margin: {selectedStrategy.marginChangeUp5 >= 0 ? '+' : ''}${selectedStrategy.marginChangeUp5?.toFixed(2) || '0'}
+                    </div>
+                  )}
+                </div>
+                <div className="bg-green-100 rounded-lg p-3">
+                  <div className="text-green-600 text-xs font-semibold">If +10%</div>
+                  <div className={`text-xl font-bold ${selectedStrategy.pnlUp10 >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                    {selectedStrategy.pnlUp10 >= 0 ? '+' : ''}${selectedStrategy.pnlUp10?.toFixed(2) || '0'}
+                  </div>
+                  <div className={`text-xs ${selectedStrategy.priceOnlyUp10 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    Price: {selectedStrategy.priceOnlyUp10 >= 0 ? '+' : ''}${selectedStrategy.priceOnlyUp10?.toFixed(2) || '0'}
+                  </div>
+                  {selectedStrategy.marginChangeUp10 !== 0 && (
+                    <div className={`text-xs ${selectedStrategy.marginChangeUp10 >= 0 ? 'text-orange-600' : 'text-orange-600'}`}>
+                      BTC margin: {selectedStrategy.marginChangeUp10 >= 0 ? '+' : ''}${selectedStrategy.marginChangeUp10?.toFixed(2) || '0'}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {/* Explanation for hedged strategies with inverse perp */}
+              {selectedStrategy.twilightPosition && selectedStrategy.binancePosition && (
+                <div className="mt-3 bg-orange-100 rounded-lg p-2 text-center">
+                  <span className="text-orange-800 text-sm">
+                    <strong>BTC Margin Effect:</strong> Your Twilight margin is in BTC. When price goes UP, your BTC margin is worth more USD. When price goes DOWN, it's worth less. This creates asymmetry even in "hedged" positions.
+                  </span>
+                </div>
+              )}
+              {selectedStrategy.breakEvenPriceMove > 0 && (
+                <div className="mt-3 bg-yellow-100 rounded-lg p-2 text-center">
+                  <span className="text-yellow-800 text-sm">
+                    <strong>Break-even price move:</strong> {selectedStrategy.marketDirection === 'BULLISH' ? '+' : '-'}{selectedStrategy.breakEvenPriceMove?.toFixed(2)}% to cover funding costs
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Position Details - PROMINENT */}
