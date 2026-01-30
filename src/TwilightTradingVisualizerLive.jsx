@@ -250,6 +250,7 @@ const TwilightTradingVisualizerLive = () => {
     let id = 1;
 
     // Helper to calculate APY
+    // IMPORTANT: Twilight = INVERSE PERP (BTC-margined), Binance = LINEAR PERP (USDT-margined)
     const calculateStrategyAPY = (strategy) => {
       const {
         twilightPosition, twilightSize, twilightLeverage,
@@ -257,70 +258,112 @@ const TwilightTradingVisualizerLive = () => {
         holdingDays = 30
       } = strategy;
 
-      // Calculate margins
-      const twilightMargin = twilightSize / twilightLeverage;
-      const binanceMargin = binanceSize / binanceLeverage;
-      const totalMargin = twilightMargin + binanceMargin;
+      // ===================
+      // MARGIN CALCULATIONS
+      // ===================
 
-      if (totalMargin === 0) return { apy: 0, dailyPnL: 0, monthlyPnL: 0 };
+      // TWILIGHT (Inverse Perp): Margin is in BTC
+      // Position size is in USD, margin = positionSize / (leverage × btcPrice) = BTC
+      const twilightMarginBTC = twilightSize > 0 ? twilightSize / (twilightLeverage * btcPrice) : 0;
+      const twilightMarginUSD = twilightMarginBTC * btcPrice; // Convert to USD for comparison
 
-      // Entry fees
+      // BINANCE (Linear Perp): Margin is in USDT
+      // Position size is in USD, margin = positionSize / leverage = USDT
+      const binanceMarginUSDT = binanceSize > 0 ? binanceSize / binanceLeverage : 0;
+
+      // Total margin in USD equivalent (for ROI calculation)
+      const totalMarginUSD = twilightMarginUSD + binanceMarginUSDT;
+
+      if (totalMarginUSD === 0) return {
+        apy: 0, dailyPnL: 0, monthlyPnL: 0, totalMargin: 0,
+        twilightMarginBTC: 0, twilightMarginUSD: 0, binanceMarginUSDT: 0,
+        totalFees: 0, basisProfit: 0, monthlyFundingPnL: 0
+      };
+
+      // ===================
+      // FEE CALCULATIONS
+      // ===================
+
+      // Twilight: 0% fee
       const twilightEntryFee = twilightSize * TWILIGHT_FEE;
+      // Binance: 0.04% taker fee
       const binanceEntryFee = binanceSize * BINANCE_TAKER_FEE;
       const totalEntryFee = twilightEntryFee + binanceEntryFee;
-
-      // Exit fees (assume same)
       const totalExitFee = totalEntryFee;
       const totalFees = totalEntryFee + totalExitFee;
 
-      // Funding calculations (per 8 hours for Binance, hourly for Twilight)
-      // Binance: 3x per day, Twilight: 24x per day
-      const binanceFundingPerDay = binanceSize * binanceFundingRate * 3;
-      const twilightFundingPerDay = twilightSize * Math.abs(twilightFundingRate) * 24;
+      // ===================
+      // FUNDING CALCULATIONS
+      // ===================
+
+      // BINANCE (Linear): Funding paid/received in USDT
+      // Payment = Position Size × Funding Rate (3x per day)
+      const binanceFundingPerDayUSDT = binanceSize * binanceFundingRate * 3;
+
+      // TWILIGHT (Inverse): Funding paid/received in BTC
+      // Payment = Position Size × Funding Rate / BTC Price (24x per day for hourly)
+      // Then convert to USD for comparison
+      const twilightFundingPerDayBTC = (twilightSize * Math.abs(twilightFundingRate) * 24) / btcPrice;
+      const twilightFundingPerDayUSD = twilightFundingPerDayBTC * btcPrice;
 
       // Determine funding direction
       let dailyFundingPnL = 0;
 
       // Binance funding: positive rate = longs pay shorts
-      if (binancePosition === 'LONG') {
-        dailyFundingPnL -= binanceFundingPerDay; // Pay if long, rate positive
-      } else if (binancePosition === 'SHORT') {
-        dailyFundingPnL += binanceFundingPerDay; // Receive if short, rate positive
+      if (binancePosition === 'LONG' && binanceFundingRate > 0) {
+        dailyFundingPnL -= binanceFundingPerDayUSDT;
+      } else if (binancePosition === 'LONG' && binanceFundingRate < 0) {
+        dailyFundingPnL += Math.abs(binanceFundingPerDayUSDT);
+      } else if (binancePosition === 'SHORT' && binanceFundingRate > 0) {
+        dailyFundingPnL += binanceFundingPerDayUSDT;
+      } else if (binancePosition === 'SHORT' && binanceFundingRate < 0) {
+        dailyFundingPnL -= Math.abs(binanceFundingPerDayUSDT);
       }
 
-      // Twilight funding: based on pool imbalance
+      // Twilight funding: based on pool imbalance (converted to USD)
       if (twilightPosition === 'LONG' && twilightFundingRate > 0) {
-        dailyFundingPnL -= twilightFundingPerDay;
+        dailyFundingPnL -= twilightFundingPerDayUSD;
       } else if (twilightPosition === 'LONG' && twilightFundingRate < 0) {
-        dailyFundingPnL += twilightFundingPerDay;
+        dailyFundingPnL += twilightFundingPerDayUSD;
       } else if (twilightPosition === 'SHORT' && twilightFundingRate > 0) {
-        dailyFundingPnL += twilightFundingPerDay;
+        dailyFundingPnL += twilightFundingPerDayUSD;
       } else if (twilightPosition === 'SHORT' && twilightFundingRate < 0) {
-        dailyFundingPnL -= twilightFundingPerDay;
+        dailyFundingPnL -= twilightFundingPerDayUSD;
       }
 
-      // Basis profit (spread capture for hedged positions)
+      // ===================
+      // BASIS PROFIT
+      // ===================
+
+      // For hedged positions, capture the spread
       let basisProfit = 0;
       if (twilightPosition && binancePosition && twilightPosition !== binancePosition) {
-        // Delta-neutral: capture spread
-        const spreadCapture = Math.abs(spread) * (Math.min(twilightSize, binanceSize) / btcPrice);
-        basisProfit = spreadCapture;
+        // Delta-neutral: capture spread when positions converge
+        // Spread profit = |spread| × position BTC size
+        const positionBTC = Math.min(twilightSize, binanceSize) / btcPrice;
+        basisProfit = Math.abs(spread) * positionBTC;
       }
 
-      // Total P&L
+      // ===================
+      // TOTAL P&L
+      // ===================
+
       const monthlyFundingPnL = dailyFundingPnL * 30;
       const monthlyPnL = basisProfit + monthlyFundingPnL - totalFees;
       const dailyPnL = monthlyPnL / 30;
 
-      // APY calculation
-      const monthlyROI = (monthlyPnL / totalMargin) * 100;
+      // APY calculation based on total capital deployed
+      const monthlyROI = (monthlyPnL / totalMarginUSD) * 100;
       const apy = monthlyROI * 12;
 
       return {
         apy: isNaN(apy) ? 0 : apy,
         dailyPnL: isNaN(dailyPnL) ? 0 : dailyPnL,
         monthlyPnL: isNaN(monthlyPnL) ? 0 : monthlyPnL,
-        totalMargin,
+        totalMargin: totalMarginUSD,
+        twilightMarginBTC,
+        twilightMarginUSD,
+        binanceMarginUSDT,
         totalFees,
         basisProfit,
         monthlyFundingPnL
@@ -816,172 +859,309 @@ const TwilightTradingVisualizerLive = () => {
         </div>
       </div>
 
-      {/* Selected Strategy Details */}
+      {/* Strategy Details Modal */}
       {selectedStrategy && (
-        <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4 shadow mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-bold text-slate-800 flex items-center gap-2">
-              <Info className="w-5 h-5 text-blue-600" />
-              Strategy Details: {selectedStrategy.name}
-            </h3>
-            <button
-              onClick={() => setSelectedStrategy(null)}
-              className="text-slate-400 hover:text-slate-600"
-            >
-              Close
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Twilight Position */}
-            <div className="bg-white rounded-lg p-4 shadow">
-              <h4 className="font-bold text-blue-700 mb-3">Twilight Position</h4>
-              {selectedStrategy.twilightPosition ? (
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Direction:</span>
-                    <span className={`font-semibold ${selectedStrategy.twilightPosition === 'LONG' ? 'text-green-600' : 'text-red-600'}`}>
-                      {selectedStrategy.twilightPosition === 'LONG' ? <ArrowUpRight className="w-4 h-4 inline" /> : <ArrowDownRight className="w-4 h-4 inline" />}
-                      {selectedStrategy.twilightPosition}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Size:</span>
-                    <span className="font-mono">${selectedStrategy.twilightSize}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Leverage:</span>
-                    <span className="font-mono">{selectedStrategy.twilightLeverage}x</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Margin:</span>
-                    <span className="font-mono">${(selectedStrategy.twilightSize / selectedStrategy.twilightLeverage).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Trading Fee:</span>
-                    <span className="font-mono text-green-600">$0.00 (0%)</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Funding Rate:</span>
-                    <span className="font-mono">{(twilightFundingRate * 100).toFixed(4)}%/hr</span>
-                  </div>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedStrategy(null)}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white p-4 rounded-t-xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-bold">{selectedStrategy.name}</h2>
+                  <p className="text-blue-100 text-sm mt-1">{selectedStrategy.description}</p>
                 </div>
-              ) : (
-                <div className="text-slate-400 italic">No Twilight position</div>
-              )}
+                <button
+                  onClick={() => setSelectedStrategy(null)}
+                  className="bg-white/20 hover:bg-white/30 rounded-full p-2 transition"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="flex gap-2 mt-3">
+                <span className={`px-2 py-1 rounded text-xs font-semibold ${selectedStrategy.category === 'Delta-Neutral' ? 'bg-purple-200 text-purple-800' : selectedStrategy.category === 'Funding Arb' ? 'bg-orange-200 text-orange-800' : selectedStrategy.category === 'Conservative' ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-800'}`}>
+                  {selectedStrategy.category}
+                </span>
+                <span className={`px-2 py-1 rounded text-xs font-semibold ${getRiskColor(selectedStrategy.risk)}`}>
+                  {selectedStrategy.risk} RISK
+                </span>
+              </div>
             </div>
 
-            {/* Binance Position */}
-            <div className="bg-white rounded-lg p-4 shadow">
-              <h4 className="font-bold text-purple-700 mb-3">Binance Position</h4>
-              {selectedStrategy.binancePosition ? (
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Direction:</span>
-                    <span className={`font-semibold ${selectedStrategy.binancePosition === 'LONG' ? 'text-green-600' : 'text-red-600'}`}>
-                      {selectedStrategy.binancePosition === 'LONG' ? <ArrowUpRight className="w-4 h-4 inline" /> : <ArrowDownRight className="w-4 h-4 inline" />}
-                      {selectedStrategy.binancePosition}
-                    </span>
+            {/* Position Details - PROMINENT */}
+            <div className="p-4 bg-slate-50 border-b-4 border-blue-500">
+              <h3 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-blue-600" />
+                EXACT POSITION DETAILS
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Twilight Position Card - INVERSE PERP (BTC-margined) */}
+                <div className={`rounded-xl p-4 ${selectedStrategy.twilightPosition ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-400'}`}>
+                  <div className="flex justify-between items-center mb-1">
+                    <div className="text-sm opacity-80">TWILIGHT POSITION</div>
+                    <span className="bg-orange-500 text-white text-xs px-2 py-0.5 rounded font-bold">INVERSE PERP</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Size:</span>
-                    <span className="font-mono">${selectedStrategy.binanceSize}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Leverage:</span>
-                    <span className="font-mono">{selectedStrategy.binanceLeverage}x</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Margin:</span>
-                    <span className="font-mono">${(selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Trading Fee:</span>
-                    <span className="font-mono text-orange-600">${(selectedStrategy.binanceSize * BINANCE_TAKER_FEE * 2).toFixed(2)} ({(BINANCE_TAKER_FEE * 100).toFixed(2)}% x2)</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Funding Rate:</span>
-                    <span className="font-mono">{(binanceFundingRate * 100).toFixed(4)}%/8h</span>
-                  </div>
+                  {selectedStrategy.twilightPosition ? (
+                    <>
+                      <div className="flex items-center gap-2 mb-3">
+                        {selectedStrategy.twilightPosition === 'LONG' ? (
+                          <ArrowUpRight className="w-8 h-8" />
+                        ) : (
+                          <ArrowDownRight className="w-8 h-8" />
+                        )}
+                        <span className="text-3xl font-bold">{selectedStrategy.twilightPosition}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="bg-white/20 rounded-lg p-2">
+                          <div className="opacity-70">Position Size (USD)</div>
+                          <div className="text-xl font-bold">${selectedStrategy.twilightSize}</div>
+                        </div>
+                        <div className="bg-white/20 rounded-lg p-2">
+                          <div className="opacity-70">Leverage</div>
+                          <div className="text-xl font-bold">{selectedStrategy.twilightLeverage}x</div>
+                        </div>
+                        <div className="bg-yellow-500/30 rounded-lg p-2 col-span-2">
+                          <div className="opacity-90 font-semibold">Margin Required (BTC)</div>
+                          <div className="text-2xl font-bold">{selectedStrategy.twilightMarginBTC?.toFixed(6) || (selectedStrategy.twilightSize / (selectedStrategy.twilightLeverage * twilightPrice)).toFixed(6)} BTC</div>
+                          <div className="text-xs opacity-70">~${selectedStrategy.twilightMarginUSD?.toFixed(2) || (selectedStrategy.twilightSize / selectedStrategy.twilightLeverage).toFixed(2)} USD</div>
+                        </div>
+                        <div className="bg-white/20 rounded-lg p-2 col-span-2">
+                          <div className="opacity-70">Trading Fee</div>
+                          <div className="text-xl font-bold text-green-300">$0.00 (0%)</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 text-xs bg-white/10 rounded p-2">
+                        <div className="font-semibold mb-1">How Inverse Perp Works:</div>
+                        <div>You deposit BTC as margin. P&L is settled in BTC.</div>
+                        <div className="mt-1">Position: {(selectedStrategy.twilightSize / twilightPrice).toFixed(6)} BTC worth at ${twilightPrice.toLocaleString()}</div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-4">No Twilight Position</div>
+                  )}
                 </div>
-              ) : (
-                <div className="text-slate-400 italic">No Binance position</div>
-              )}
-            </div>
-          </div>
 
-          {/* P&L Breakdown */}
-          <div className="mt-4 bg-white rounded-lg p-4 shadow">
-            <h4 className="font-bold text-slate-700 mb-3">Projected P&L Breakdown (Monthly)</h4>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-              <div className="border-l-4 border-slate-300 pl-3">
-                <div className="text-slate-500">Total Margin</div>
-                <div className="font-bold text-slate-800">${selectedStrategy.totalMargin.toFixed(2)}</div>
-              </div>
-              <div className="border-l-4 border-blue-300 pl-3">
-                <div className="text-slate-500">Basis Capture</div>
-                <div className="font-bold text-blue-600">${selectedStrategy.basisProfit.toFixed(2)}</div>
-              </div>
-              <div className="border-l-4 border-orange-300 pl-3">
-                <div className="text-slate-500">Funding P&L</div>
-                <div className={`font-bold ${selectedStrategy.monthlyFundingPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {selectedStrategy.monthlyFundingPnL >= 0 ? '+' : ''}${selectedStrategy.monthlyFundingPnL.toFixed(2)}
+                {/* Binance Position Card - LINEAR PERP (USDT-margined) */}
+                <div className={`rounded-xl p-4 ${selectedStrategy.binancePosition ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-400'}`}>
+                  <div className="flex justify-between items-center mb-1">
+                    <div className="text-sm opacity-80">BINANCE POSITION</div>
+                    <span className="bg-green-500 text-white text-xs px-2 py-0.5 rounded font-bold">LINEAR PERP</span>
+                  </div>
+                  {selectedStrategy.binancePosition ? (
+                    <>
+                      <div className="flex items-center gap-2 mb-3">
+                        {selectedStrategy.binancePosition === 'LONG' ? (
+                          <ArrowUpRight className="w-8 h-8" />
+                        ) : (
+                          <ArrowDownRight className="w-8 h-8" />
+                        )}
+                        <span className="text-3xl font-bold">{selectedStrategy.binancePosition}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="bg-white/20 rounded-lg p-2">
+                          <div className="opacity-70">Position Size (USD)</div>
+                          <div className="text-xl font-bold">${selectedStrategy.binanceSize}</div>
+                        </div>
+                        <div className="bg-white/20 rounded-lg p-2">
+                          <div className="opacity-70">Leverage</div>
+                          <div className="text-xl font-bold">{selectedStrategy.binanceLeverage}x</div>
+                        </div>
+                        <div className="bg-green-500/30 rounded-lg p-2 col-span-2">
+                          <div className="opacity-90 font-semibold">Margin Required (USDT)</div>
+                          <div className="text-2xl font-bold">{selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)} USDT</div>
+                        </div>
+                        <div className="bg-white/20 rounded-lg p-2 col-span-2">
+                          <div className="opacity-70">Trading Fee</div>
+                          <div className="text-xl font-bold text-orange-300">${(selectedStrategy.binanceSize * BINANCE_TAKER_FEE * 2).toFixed(2)} (0.04% x2)</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 text-xs bg-white/10 rounded p-2">
+                        <div className="font-semibold mb-1">How Linear Perp Works:</div>
+                        <div>You deposit USDT as margin. P&L is settled in USDT.</div>
+                        <div className="mt-1">Position: {(selectedStrategy.binanceSize / cexPrice).toFixed(6)} BTC worth at ${cexPrice.toLocaleString()}</div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-4">No Binance Position</div>
+                  )}
                 </div>
               </div>
-              <div className="border-l-4 border-red-300 pl-3">
-                <div className="text-slate-500">Total Fees</div>
-                <div className="font-bold text-red-600">-${selectedStrategy.totalFees.toFixed(2)}</div>
-              </div>
-              <div className="border-l-4 border-green-500 pl-3">
-                <div className="text-slate-500">Net Monthly</div>
-                <div className={`font-bold text-lg ${selectedStrategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {selectedStrategy.monthlyPnL >= 0 ? '+' : ''}${selectedStrategy.monthlyPnL.toFixed(2)}
-                </div>
-              </div>
-            </div>
-            <div className="mt-4 pt-4 border-t flex justify-between items-center">
-              <span className="text-slate-600">Projected Annual Percentage Yield (APY):</span>
-              <span className={`text-3xl font-bold ${getAPYColor(selectedStrategy.apy)}`}>
-                {selectedStrategy.apy >= 0 ? '+' : ''}{selectedStrategy.apy.toFixed(2)}%
-              </span>
-            </div>
-          </div>
 
-          {/* Execution Guide */}
-          <div className="mt-4 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <h4 className="font-bold text-yellow-800 mb-2 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              Execution Steps
-            </h4>
-            <ol className="text-sm text-yellow-900 space-y-1 list-decimal list-inside">
-              {selectedStrategy.twilightPosition && (
-                <li>Open {selectedStrategy.twilightPosition} position on Twilight: ${selectedStrategy.twilightSize} at {selectedStrategy.twilightLeverage}x leverage</li>
-              )}
-              {selectedStrategy.binancePosition && (
-                <li>Open {selectedStrategy.binancePosition} position on Binance Futures: ${selectedStrategy.binanceSize} at {selectedStrategy.binanceLeverage}x leverage</li>
-              )}
-              <li>Monitor funding rates and adjust if needed</li>
-              <li>Close both positions simultaneously when taking profit</li>
-            </ol>
+              {/* Capital Requirements Summary */}
+              <div className="mt-4 bg-white rounded-lg p-4 border-2 border-slate-300">
+                <h4 className="font-bold text-slate-800 mb-2">Total Capital Required</h4>
+                <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div className="text-center">
+                    <div className="text-slate-500">BTC Needed (Twilight)</div>
+                    <div className="text-xl font-bold text-orange-600">
+                      {selectedStrategy.twilightMarginBTC?.toFixed(6) || (selectedStrategy.twilightPosition ? (selectedStrategy.twilightSize / (selectedStrategy.twilightLeverage * twilightPrice)).toFixed(6) : '0')} BTC
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-slate-500">USDT Needed (Binance)</div>
+                    <div className="text-xl font-bold text-green-600">
+                      {selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binancePosition ? (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2) : '0')} USDT
+                    </div>
+                  </div>
+                  <div className="text-center bg-slate-100 rounded-lg p-2">
+                    <div className="text-slate-500">Total (USD equiv)</div>
+                    <div className="text-xl font-bold text-slate-800">
+                      ${selectedStrategy.totalMargin?.toFixed(2) || '0'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Funding Rates */}
+            <div className="p-4 bg-white border-b">
+              <h3 className="font-bold text-slate-800 mb-3">Funding Rate Impact</h3>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="bg-blue-50 rounded-lg p-3">
+                  <div className="text-blue-600 font-semibold">Twilight Funding</div>
+                  <div className="text-2xl font-bold text-blue-800">{(twilightFundingRate * 100).toFixed(4)}%/hr</div>
+                  <div className="text-xs text-blue-600 mt-1">
+                    {twilightFundingRate > 0 ? 'Longs pay, Shorts receive' : twilightFundingRate < 0 ? 'Shorts pay, Longs receive' : 'Balanced (no payments)'}
+                  </div>
+                </div>
+                <div className="bg-purple-50 rounded-lg p-3">
+                  <div className="text-purple-600 font-semibold">Binance Funding</div>
+                  <div className="text-2xl font-bold text-purple-800">{(binanceFundingRate * 100).toFixed(4)}%/8h</div>
+                  <div className="text-xs text-purple-600 mt-1">
+                    {binanceFundingRate > 0 ? 'Longs pay, Shorts receive' : 'Shorts pay, Longs receive'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* P&L Breakdown */}
+            <div className="p-4 bg-white border-b">
+              <h3 className="font-bold text-slate-800 mb-3">Projected Monthly P&L</h3>
+              <div className="grid grid-cols-5 gap-2 text-sm">
+                <div className="bg-slate-100 rounded-lg p-3 text-center">
+                  <div className="text-slate-500 text-xs">Total Margin</div>
+                  <div className="font-bold text-slate-800 text-lg">${selectedStrategy.totalMargin.toFixed(2)}</div>
+                </div>
+                <div className="bg-blue-100 rounded-lg p-3 text-center">
+                  <div className="text-blue-600 text-xs">Basis Capture</div>
+                  <div className="font-bold text-blue-800 text-lg">${selectedStrategy.basisProfit.toFixed(2)}</div>
+                </div>
+                <div className={`rounded-lg p-3 text-center ${selectedStrategy.monthlyFundingPnL >= 0 ? 'bg-green-100' : 'bg-red-100'}`}>
+                  <div className={`text-xs ${selectedStrategy.monthlyFundingPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>Funding P&L</div>
+                  <div className={`font-bold text-lg ${selectedStrategy.monthlyFundingPnL >= 0 ? 'text-green-800' : 'text-red-800'}`}>
+                    {selectedStrategy.monthlyFundingPnL >= 0 ? '+' : ''}${selectedStrategy.monthlyFundingPnL.toFixed(2)}
+                  </div>
+                </div>
+                <div className="bg-red-100 rounded-lg p-3 text-center">
+                  <div className="text-red-600 text-xs">Fees</div>
+                  <div className="font-bold text-red-800 text-lg">-${selectedStrategy.totalFees.toFixed(2)}</div>
+                </div>
+                <div className={`rounded-lg p-3 text-center ${selectedStrategy.monthlyPnL >= 0 ? 'bg-green-500' : 'bg-red-500'} text-white`}>
+                  <div className="text-xs opacity-80">Net P&L</div>
+                  <div className="font-bold text-lg">
+                    {selectedStrategy.monthlyPnL >= 0 ? '+' : ''}${selectedStrategy.monthlyPnL.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 bg-gradient-to-r from-green-500 to-emerald-600 rounded-lg p-4 text-white text-center">
+                <div className="text-sm opacity-80">Projected Annual APY</div>
+                <div className="text-4xl font-bold">
+                  {selectedStrategy.apy >= 0 ? '+' : ''}{selectedStrategy.apy.toFixed(2)}%
+                </div>
+              </div>
+            </div>
+
+            {/* Step by Step Execution */}
+            <div className="p-4 bg-yellow-50">
+              <h3 className="font-bold text-yellow-800 mb-3 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5" />
+                Step-by-Step Execution Guide
+              </h3>
+              <div className="space-y-3">
+                {selectedStrategy.twilightPosition && (
+                  <div className="bg-white rounded-lg p-3 border-l-4 border-orange-500">
+                    <div className="flex justify-between items-center">
+                      <div className="font-bold text-blue-700">Step 1: Open Twilight Position (Inverse Perp)</div>
+                      <span className="bg-orange-100 text-orange-700 text-xs px-2 py-0.5 rounded">BTC-MARGINED</span>
+                    </div>
+                    <div className="text-sm text-slate-700 mt-2">
+                      <span className="font-mono bg-blue-100 px-2 py-0.5 rounded">{selectedStrategy.twilightPosition}</span>
+                      {' '}${selectedStrategy.twilightSize} USD worth of BTC at{' '}
+                      <span className="font-mono bg-blue-100 px-2 py-0.5 rounded">{selectedStrategy.twilightLeverage}x</span> leverage
+                    </div>
+                    <div className="mt-2 p-2 bg-orange-50 rounded text-sm">
+                      <div className="font-semibold text-orange-800">BTC Margin Required:</div>
+                      <div className="text-xl font-bold text-orange-700">
+                        {(selectedStrategy.twilightSize / (selectedStrategy.twilightLeverage * twilightPrice)).toFixed(6)} BTC
+                      </div>
+                      <div className="text-xs text-orange-600">
+                        (~${(selectedStrategy.twilightSize / selectedStrategy.twilightLeverage).toFixed(2)} USD at current price)
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {selectedStrategy.binancePosition && (
+                  <div className="bg-white rounded-lg p-3 border-l-4 border-green-500">
+                    <div className="flex justify-between items-center">
+                      <div className="font-bold text-purple-700">Step {selectedStrategy.twilightPosition ? '2' : '1'}: Open Binance Position (Linear Perp)</div>
+                      <span className="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded">USDT-MARGINED</span>
+                    </div>
+                    <div className="text-sm text-slate-700 mt-2">
+                      <span className="font-mono bg-purple-100 px-2 py-0.5 rounded">{selectedStrategy.binancePosition}</span>
+                      {' '}${selectedStrategy.binanceSize} USD worth of BTC-PERP at{' '}
+                      <span className="font-mono bg-purple-100 px-2 py-0.5 rounded">{selectedStrategy.binanceLeverage}x</span> leverage
+                    </div>
+                    <div className="mt-2 p-2 bg-green-50 rounded text-sm">
+                      <div className="font-semibold text-green-800">USDT Margin Required:</div>
+                      <div className="text-xl font-bold text-green-700">
+                        {(selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)} USDT
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div className="bg-white rounded-lg p-3 border-l-4 border-slate-500">
+                  <div className="font-bold text-slate-700">Step {(selectedStrategy.twilightPosition ? 1 : 0) + (selectedStrategy.binancePosition ? 1 : 0) + 1}: Monitor & Manage</div>
+                  <div className="text-sm text-slate-700 mt-1">
+                    Monitor funding rates. Close both positions simultaneously when taking profit or if conditions change.
+                  </div>
+                  <div className="text-xs text-slate-500 mt-2">
+                    Note: P&L on Twilight is in BTC, P&L on Binance is in USDT
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Fee Comparison */}
+      {/* Fee & Contract Comparison */}
       <div className="bg-white rounded-lg p-4 shadow">
-        <h3 className="font-bold text-slate-800 mb-3">Fee Structure</h3>
+        <h3 className="font-bold text-slate-800 mb-3">Contract Type & Fee Structure</h3>
         <div className="grid grid-cols-2 gap-4 text-sm">
-          <div className="bg-green-50 rounded-lg p-3">
-            <div className="font-bold text-green-800">Twilight</div>
-            <div className="text-green-700">Trading Fee: 0%</div>
-            <div className="text-green-700">Funding: Hourly, imbalance-based</div>
+          <div className="bg-blue-50 rounded-lg p-3 border-2 border-blue-200">
+            <div className="flex justify-between items-center mb-2">
+              <div className="font-bold text-blue-800">Twilight</div>
+              <span className="bg-orange-500 text-white text-xs px-2 py-0.5 rounded font-bold">INVERSE PERP</span>
+            </div>
+            <div className="text-blue-700">Margin: <span className="font-bold">BTC</span></div>
+            <div className="text-blue-700">P&L Settlement: <span className="font-bold">BTC</span></div>
+            <div className="text-blue-700">Trading Fee: <span className="font-bold text-green-600">0%</span></div>
+            <div className="text-blue-700">Funding: Hourly, imbalance-based</div>
           </div>
-          <div className="bg-orange-50 rounded-lg p-3">
-            <div className="font-bold text-orange-800">Binance</div>
-            <div className="text-orange-700">Taker Fee: 0.04%</div>
-            <div className="text-orange-700">Maker Fee: 0.02%</div>
-            <div className="text-orange-700">Funding: Every 8 hours</div>
+          <div className="bg-purple-50 rounded-lg p-3 border-2 border-purple-200">
+            <div className="flex justify-between items-center mb-2">
+              <div className="font-bold text-purple-800">Binance</div>
+              <span className="bg-green-500 text-white text-xs px-2 py-0.5 rounded font-bold">LINEAR PERP</span>
+            </div>
+            <div className="text-purple-700">Margin: <span className="font-bold">USDT</span></div>
+            <div className="text-purple-700">P&L Settlement: <span className="font-bold">USDT</span></div>
+            <div className="text-purple-700">Taker Fee: <span className="font-bold text-orange-600">0.04%</span></div>
+            <div className="text-purple-700">Funding: Every 8 hours</div>
           </div>
+        </div>
+        <div className="mt-3 p-2 bg-yellow-50 rounded text-xs text-yellow-800">
+          <strong>Important:</strong> Hedged strategies require BOTH BTC (for Twilight) AND USDT (for Binance) capital.
         </div>
       </div>
     </div>
