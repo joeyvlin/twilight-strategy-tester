@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell } from 'recharts';
-import { ArrowUpRight, ArrowDownRight, DollarSign, TrendingUp, AlertCircle, Wifi, WifiOff, Activity, Settings, Info } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, DollarSign, TrendingUp, AlertCircle, Wifi, WifiOff, Activity, Settings, Info, ArrowRight } from 'lucide-react';
 
-const TwilightTradingVisualizerLive = () => {
+const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // ===================
   // CONFIGURATION
   // ===================
@@ -852,10 +852,21 @@ const TwilightTradingVisualizerLive = () => {
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-slate-800 mb-1">
-              Twilight Strategy Tester
-              {!useManualMode && <span className="text-red-500 animate-pulse ml-3 text-xl">LIVE</span>}
-            </h1>
+            <div className="flex items-center gap-3 mb-1">
+              <h1 className="text-3xl font-bold text-slate-800">
+                Twilight Strategy Tester
+                {!useManualMode && <span className="text-red-500 animate-pulse ml-3 text-xl">LIVE</span>}
+              </h1>
+              {onNavigateToCEX && (
+                <button
+                  onClick={onNavigateToCEX}
+                  className="flex items-center gap-1 px-3 py-1 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 transition"
+                >
+                  Compare CEX
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              )}
+            </div>
             <p className="text-slate-600 text-sm">TVL: ${tvl} | 20 Trading Strategies with Live APY</p>
           </div>
 
