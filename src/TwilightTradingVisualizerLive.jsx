@@ -258,6 +258,10 @@ const TwilightTradingVisualizerLive = () => {
         holdingDays = 30
       } = strategy;
 
+      // Maintenance margin rates
+      const TWILIGHT_MAINT_MARGIN = 0.005; // 0.5%
+      const BINANCE_MAINT_MARGIN = 0.004; // 0.4%
+
       // ===================
       // MARGIN CALCULATIONS
       // ===================
@@ -274,10 +278,75 @@ const TwilightTradingVisualizerLive = () => {
       // Total margin in USD equivalent (for ROI calculation)
       const totalMarginUSD = twilightMarginUSD + binanceMarginUSDT;
 
+      // ===================
+      // LIQUIDATION PRICES
+      // ===================
+
+      // TWILIGHT (Inverse Perp) Liquidation:
+      // Long: Liq = Entry × Leverage / (Leverage + 1 - Leverage × MaintMargin)
+      // Short: Liq = Entry × Leverage / (Leverage - 1 + Leverage × MaintMargin)
+      let twilightLiquidationPrice = null;
+      let twilightLiquidationPct = null;
+      if (twilightPosition === 'LONG' && twilightLeverage > 0) {
+        twilightLiquidationPrice = btcPrice * twilightLeverage / (twilightLeverage + 1 - twilightLeverage * TWILIGHT_MAINT_MARGIN);
+        twilightLiquidationPct = ((btcPrice - twilightLiquidationPrice) / btcPrice) * 100;
+      } else if (twilightPosition === 'SHORT' && twilightLeverage > 1) {
+        twilightLiquidationPrice = btcPrice * twilightLeverage / (twilightLeverage - 1 + twilightLeverage * TWILIGHT_MAINT_MARGIN);
+        twilightLiquidationPct = ((twilightLiquidationPrice - btcPrice) / btcPrice) * 100;
+      }
+
+      // BINANCE (Linear Perp) Liquidation:
+      // Long: Liq = Entry × (1 - (1 - MaintMargin) / Leverage)
+      // Short: Liq = Entry × (1 + (1 - MaintMargin) / Leverage)
+      let binanceLiquidationPrice = null;
+      let binanceLiquidationPct = null;
+      if (binancePosition === 'LONG' && binanceLeverage > 0) {
+        binanceLiquidationPrice = cexPrice * (1 - (1 - BINANCE_MAINT_MARGIN) / binanceLeverage);
+        binanceLiquidationPct = ((cexPrice - binanceLiquidationPrice) / cexPrice) * 100;
+      } else if (binancePosition === 'SHORT' && binanceLeverage > 0) {
+        binanceLiquidationPrice = cexPrice * (1 + (1 - BINANCE_MAINT_MARGIN) / binanceLeverage);
+        binanceLiquidationPct = ((binanceLiquidationPrice - cexPrice) / cexPrice) * 100;
+      }
+
+      // ===================
+      // STOP LOSS & TAKE PROFIT
+      // ===================
+
+      // Stop Loss: Set at 50% of the way to liquidation (to protect capital)
+      let twilightStopLoss = null;
+      let twilightStopLossPct = null;
+      if (twilightLiquidationPrice && twilightPosition === 'LONG') {
+        twilightStopLoss = btcPrice - (btcPrice - twilightLiquidationPrice) * 0.5;
+        twilightStopLossPct = ((btcPrice - twilightStopLoss) / btcPrice) * 100;
+      } else if (twilightLiquidationPrice && twilightPosition === 'SHORT') {
+        twilightStopLoss = btcPrice + (twilightLiquidationPrice - btcPrice) * 0.5;
+        twilightStopLossPct = ((twilightStopLoss - btcPrice) / btcPrice) * 100;
+      }
+
+      let binanceStopLoss = null;
+      let binanceStopLossPct = null;
+      if (binanceLiquidationPrice && binancePosition === 'LONG') {
+        binanceStopLoss = cexPrice - (cexPrice - binanceLiquidationPrice) * 0.5;
+        binanceStopLossPct = ((cexPrice - binanceStopLoss) / cexPrice) * 100;
+      } else if (binanceLiquidationPrice && binancePosition === 'SHORT') {
+        binanceStopLoss = cexPrice + (binanceLiquidationPrice - cexPrice) * 0.5;
+        binanceStopLossPct = ((binanceStopLoss - cexPrice) / cexPrice) * 100;
+      }
+
+      // Max loss at stop loss (in USD)
+      const twilightMaxLoss = twilightStopLossPct ? (twilightStopLossPct / 100) * twilightSize : 0;
+      const binanceMaxLoss = binanceStopLossPct ? (binanceStopLossPct / 100) * binanceSize : 0;
+      const totalMaxLoss = twilightMaxLoss + binanceMaxLoss;
+
       if (totalMarginUSD === 0) return {
         apy: 0, dailyPnL: 0, monthlyPnL: 0, totalMargin: 0,
         twilightMarginBTC: 0, twilightMarginUSD: 0, binanceMarginUSDT: 0,
-        totalFees: 0, basisProfit: 0, monthlyFundingPnL: 0
+        totalFees: 0, basisProfit: 0, monthlyFundingPnL: 0,
+        twilightLiquidationPrice: null, twilightLiquidationPct: null,
+        binanceLiquidationPrice: null, binanceLiquidationPct: null,
+        twilightStopLoss: null, twilightStopLossPct: null,
+        binanceStopLoss: null, binanceStopLossPct: null,
+        totalMaxLoss: 0, breakEvenDays: 0
       };
 
       // ===================
@@ -352,6 +421,9 @@ const TwilightTradingVisualizerLive = () => {
       const monthlyPnL = basisProfit + monthlyFundingPnL - totalFees;
       const dailyPnL = monthlyPnL / 30;
 
+      // Break-even: days until fees are covered by funding
+      const breakEvenDays = dailyFundingPnL > 0 ? Math.ceil(totalFees / dailyFundingPnL) : Infinity;
+
       // APY calculation based on total capital deployed
       const monthlyROI = (monthlyPnL / totalMarginUSD) * 100;
       const apy = monthlyROI * 12;
@@ -366,7 +438,18 @@ const TwilightTradingVisualizerLive = () => {
         binanceMarginUSDT,
         totalFees,
         basisProfit,
-        monthlyFundingPnL
+        monthlyFundingPnL,
+        // Risk management
+        twilightLiquidationPrice,
+        twilightLiquidationPct,
+        binanceLiquidationPrice,
+        binanceLiquidationPct,
+        twilightStopLoss,
+        twilightStopLossPct,
+        binanceStopLoss,
+        binanceStopLossPct,
+        totalMaxLoss,
+        breakEvenDays: isFinite(breakEvenDays) ? breakEvenDays : null
       };
     };
 
@@ -1068,6 +1151,137 @@ const TwilightTradingVisualizerLive = () => {
                 <div className="text-sm opacity-80">Projected Annual APY</div>
                 <div className="text-4xl font-bold">
                   {selectedStrategy.apy >= 0 ? '+' : ''}{selectedStrategy.apy.toFixed(2)}%
+                </div>
+              </div>
+            </div>
+
+            {/* RISK MANAGEMENT - CRITICAL SECTION */}
+            <div className="p-4 bg-red-50 border-b-4 border-red-500">
+              <h3 className="font-bold text-red-800 text-lg mb-3 flex items-center gap-2">
+                <AlertCircle className="w-6 h-6 text-red-600" />
+                RISK MANAGEMENT - STOP LOSS & LIQUIDATION
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                {/* Twilight Risk */}
+                {selectedStrategy.twilightPosition && (
+                  <div className="bg-white rounded-lg p-4 border-2 border-red-200">
+                    <div className="font-bold text-blue-700 mb-2">Twilight Position Risk</div>
+                    <div className="space-y-3">
+                      <div className="bg-red-100 rounded-lg p-3">
+                        <div className="text-red-600 text-xs font-semibold">LIQUIDATION PRICE</div>
+                        <div className="text-2xl font-bold text-red-700">
+                          ${selectedStrategy.twilightLiquidationPrice?.toLocaleString(undefined, {maximumFractionDigits: 0}) || 'N/A'}
+                        </div>
+                        <div className="text-xs text-red-600">
+                          {selectedStrategy.twilightLiquidationPct?.toFixed(1)}% {selectedStrategy.twilightPosition === 'LONG' ? 'below' : 'above'} entry
+                        </div>
+                        <div className="text-xs text-red-500 mt-1">
+                          Position goes to $0 at this price
+                        </div>
+                      </div>
+                      <div className="bg-orange-100 rounded-lg p-3">
+                        <div className="text-orange-600 text-xs font-semibold">RECOMMENDED STOP LOSS</div>
+                        <div className="text-2xl font-bold text-orange-700">
+                          ${selectedStrategy.twilightStopLoss?.toLocaleString(undefined, {maximumFractionDigits: 0}) || 'N/A'}
+                        </div>
+                        <div className="text-xs text-orange-600">
+                          {selectedStrategy.twilightStopLossPct?.toFixed(1)}% {selectedStrategy.twilightPosition === 'LONG' ? 'below' : 'above'} entry
+                        </div>
+                        <div className="text-xs text-orange-500 mt-1">
+                          Max loss: ~${((selectedStrategy.twilightStopLossPct || 0) / 100 * selectedStrategy.twilightSize).toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Binance Risk */}
+                {selectedStrategy.binancePosition && (
+                  <div className="bg-white rounded-lg p-4 border-2 border-red-200">
+                    <div className="font-bold text-purple-700 mb-2">Binance Position Risk</div>
+                    <div className="space-y-3">
+                      <div className="bg-red-100 rounded-lg p-3">
+                        <div className="text-red-600 text-xs font-semibold">LIQUIDATION PRICE</div>
+                        <div className="text-2xl font-bold text-red-700">
+                          ${selectedStrategy.binanceLiquidationPrice?.toLocaleString(undefined, {maximumFractionDigits: 0}) || 'N/A'}
+                        </div>
+                        <div className="text-xs text-red-600">
+                          {selectedStrategy.binanceLiquidationPct?.toFixed(1)}% {selectedStrategy.binancePosition === 'LONG' ? 'below' : 'above'} entry
+                        </div>
+                        <div className="text-xs text-red-500 mt-1">
+                          Position goes to $0 at this price
+                        </div>
+                      </div>
+                      <div className="bg-orange-100 rounded-lg p-3">
+                        <div className="text-orange-600 text-xs font-semibold">RECOMMENDED STOP LOSS</div>
+                        <div className="text-2xl font-bold text-orange-700">
+                          ${selectedStrategy.binanceStopLoss?.toLocaleString(undefined, {maximumFractionDigits: 0}) || 'N/A'}
+                        </div>
+                        <div className="text-xs text-orange-600">
+                          {selectedStrategy.binanceStopLossPct?.toFixed(1)}% {selectedStrategy.binancePosition === 'LONG' ? 'below' : 'above'} entry
+                        </div>
+                        <div className="text-xs text-orange-500 mt-1">
+                          Max loss: ~${((selectedStrategy.binanceStopLossPct || 0) / 100 * selectedStrategy.binanceSize).toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Combined Risk Summary */}
+              <div className="bg-white rounded-lg p-4 border-2 border-red-300">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                  <div>
+                    <div className="text-slate-500 text-xs">Total Max Loss (at SL)</div>
+                    <div className="text-xl font-bold text-red-600">
+                      -${selectedStrategy.totalMaxLoss?.toFixed(2) || '0'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500 text-xs">Max Loss % of Margin</div>
+                    <div className="text-xl font-bold text-red-600">
+                      -{((selectedStrategy.totalMaxLoss || 0) / (selectedStrategy.totalMargin || 1) * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500 text-xs">Break-even Days</div>
+                    <div className="text-xl font-bold text-blue-600">
+                      {selectedStrategy.breakEvenDays || 'N/A'} days
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500 text-xs">Risk/Reward</div>
+                    <div className={`text-xl font-bold ${(selectedStrategy.monthlyPnL || 0) / (selectedStrategy.totalMaxLoss || 1) > 0.5 ? 'text-green-600' : 'text-red-600'}`}>
+                      {selectedStrategy.totalMaxLoss > 0 ? ((selectedStrategy.monthlyPnL || 0) / selectedStrategy.totalMaxLoss).toFixed(2) : 'N/A'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* When to Close */}
+              <div className="mt-4 bg-yellow-100 rounded-lg p-4 border border-yellow-400">
+                <div className="font-bold text-yellow-800 mb-2">When to Close Positions</div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <div className="font-semibold text-green-700 mb-1">Take Profit Triggers:</div>
+                    <ul className="text-slate-700 space-y-1 list-disc list-inside">
+                      <li>Funding rate flips direction significantly</li>
+                      <li>Spread converges (for hedged strategies)</li>
+                      <li>After {selectedStrategy.breakEvenDays ? selectedStrategy.breakEvenDays * 3 : 30}+ days of funding collection</li>
+                      <li>Monthly ROI target reached ({((selectedStrategy.monthlyPnL || 0) / (selectedStrategy.totalMargin || 1) * 100).toFixed(1)}%)</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-red-700 mb-1">Exit Immediately If:</div>
+                    <ul className="text-slate-700 space-y-1 list-disc list-inside">
+                      <li>Price hits stop loss level</li>
+                      <li>Funding rate changes dramatically against you</li>
+                      <li>One leg approaches liquidation</li>
+                      <li>Unable to add margin when needed</li>
+                    </ul>
+                  </div>
                 </div>
               </div>
             </div>
