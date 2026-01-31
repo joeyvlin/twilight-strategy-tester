@@ -30,6 +30,13 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [lastFuturesUpdate, setLastFuturesUpdate] = useState(null);
   const [lastMarkPriceUpdate, setLastMarkPriceUpdate] = useState(null);
 
+  // Bybit inverse BTCUSD state
+  const [bybitPrice, setBybitPrice] = useState(0);
+  const [bybitFundingRate, setBybitFundingRate] = useState(0.0001); // 0.01% default
+  const [bybitNextFundingTime, setBybitNextFundingTime] = useState(null);
+  const [isBybitConnected, setIsBybitConnected] = useState(false);
+  const [lastBybitUpdate, setLastBybitUpdate] = useState(null);
+
   // Pool state (for Twilight funding rate calculation)
   const [twilightLongSize, setTwilightLongSize] = useState(0);
   const [twilightShortSize, setTwilightShortSize] = useState(0);
@@ -38,6 +45,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [tvl, setTvl] = useState(DEFAULT_TVL);
   const [useManualMode, setUseManualMode] = useState(false);
   const [selectedStrategy, setSelectedStrategy] = useState(null);
+  const [tradeSize, setTradeSize] = useState(100); // Trade size for impact calculator
 
   // Price/funding history for charts
   const [priceHistory, setPriceHistory] = useState([]);
@@ -48,10 +56,17 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const spotWsRef = useRef(null);
   const futuresWsRef = useRef(null);
   const markPriceWsRef = useRef(null);
+  const bybitWsRef = useRef(null);
 
   // ===================
   // WEBSOCKET CONNECTIONS
   // ===================
+
+  // Throttle refs to prevent excessive re-renders
+  const lastSpotPriceRef = useRef(0);
+  const lastFuturesPriceRef = useRef(0);
+  const lastUpdateTimeRef = useRef(0);
+  const UPDATE_THROTTLE_MS = 100; // Update at most every 100ms
 
   // Connect to Binance Spot WebSocket (for Twilight pricing)
   useEffect(() => {
@@ -59,7 +74,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
     const connectSpotWebSocket = () => {
       try {
-        const spotWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+        // Use aggTrade for slightly less frequent but still real-time updates
+        const spotWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
 
         spotWs.onopen = () => {
           console.log('Connected to Binance Spot WebSocket');
@@ -67,10 +83,19 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         };
 
         spotWs.onmessage = (event) => {
+          const now = Date.now();
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
-          setTwilightPrice(Math.round(price));
-          setLastSpotUpdate(new Date().toLocaleTimeString());
+          const roundedPrice = Math.round(price);
+
+          // Only update if price changed and throttle time passed
+          if (roundedPrice !== lastSpotPriceRef.current &&
+              now - lastUpdateTimeRef.current > UPDATE_THROTTLE_MS) {
+            lastSpotPriceRef.current = roundedPrice;
+            lastUpdateTimeRef.current = now;
+            setTwilightPrice(roundedPrice);
+            setLastSpotUpdate(new Date().toLocaleTimeString());
+          }
         };
 
         spotWs.onerror = () => setIsSpotConnected(false);
@@ -95,7 +120,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
     const connectFuturesWebSocket = () => {
       try {
-        const futuresWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@trade');
+        // Use aggTrade for slightly less frequent but still real-time updates
+        const futuresWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');
 
         futuresWs.onopen = () => {
           console.log('Connected to Binance Futures WebSocket');
@@ -103,10 +129,18 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         };
 
         futuresWs.onmessage = (event) => {
+          const now = Date.now();
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
-          setCexPrice(Math.round(price));
-          setLastFuturesUpdate(new Date().toLocaleTimeString());
+          const roundedPrice = Math.round(price);
+
+          // Only update if price changed
+          if (roundedPrice !== lastFuturesPriceRef.current &&
+              now - lastUpdateTimeRef.current > UPDATE_THROTTLE_MS) {
+            lastFuturesPriceRef.current = roundedPrice;
+            setCexPrice(roundedPrice);
+            setLastFuturesUpdate(new Date().toLocaleTimeString());
+          }
         };
 
         futuresWs.onerror = () => setIsFuturesConnected(false);
@@ -132,7 +166,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     const connectMarkPriceWebSocket = () => {
       try {
         // Mark price stream includes funding rate - updates every 3s
-        const markPriceWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@markPrice');
+        const markPriceWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@markPrice@1s');
 
         markPriceWs.onopen = () => {
           console.log('Connected to Binance Mark Price WebSocket');
@@ -169,6 +203,114 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
     connectMarkPriceWebSocket();
     return () => markPriceWsRef.current?.close();
+  }, [useManualMode]);
+
+  // Connect to Bybit Inverse BTCUSD WebSocket
+  // Endpoint: wss://stream.bybit.com/v5/public/inverse
+  const lastBybitPriceRef = useRef(0);
+  useEffect(() => {
+    if (useManualMode) return;
+
+    let reconnectTimeout = null;
+    let pingInterval = null;
+
+    const connectBybitWebSocket = () => {
+      try {
+        // Bybit V5 public inverse WebSocket
+        const bybitWs = new WebSocket('wss://stream.bybit.com/v5/public/inverse');
+
+        bybitWs.onopen = () => {
+          console.log('Connected to Bybit Inverse WebSocket');
+          setIsBybitConnected(true);
+
+          // Subscribe to BTCUSD ticker and tickers (for funding rate)
+          const subscribeMsg = {
+            op: 'subscribe',
+            args: ['tickers.BTCUSD']
+          };
+          bybitWs.send(JSON.stringify(subscribeMsg));
+
+          // Bybit requires ping every 20 seconds to keep connection alive
+          pingInterval = setInterval(() => {
+            if (bybitWs.readyState === WebSocket.OPEN) {
+              bybitWs.send(JSON.stringify({ op: 'ping' }));
+            }
+          }, 20000);
+        };
+
+        bybitWs.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+
+            // Handle pong response
+            if (message.op === 'pong' || message.ret_msg === 'pong') {
+              return;
+            }
+
+            // Handle subscription confirmation
+            if (message.op === 'subscribe') {
+              console.log('Bybit subscription:', message.success ? 'success' : 'failed');
+              return;
+            }
+
+            // Handle ticker data
+            // Format: { topic: "tickers.BTCUSD", data: { symbol, lastPrice, fundingRate, nextFundingTime, ... } }
+            if (message.topic && message.topic.startsWith('tickers.BTCUSD') && message.data) {
+              const data = message.data;
+              const price = parseFloat(data.lastPrice) || parseFloat(data.markPrice) || 0;
+              const fundingRate = parseFloat(data.fundingRate) || 0;
+              const nextFunding = parseInt(data.nextFundingTime) || null;
+
+              // Throttle updates
+              const roundedPrice = Math.round(price);
+              if (roundedPrice > 0 && roundedPrice !== lastBybitPriceRef.current) {
+                lastBybitPriceRef.current = roundedPrice;
+                setBybitPrice(roundedPrice);
+                setLastBybitUpdate(new Date().toLocaleTimeString());
+              }
+
+              if (fundingRate !== 0) {
+                setBybitFundingRate(fundingRate);
+              }
+              if (nextFunding) {
+                setBybitNextFundingTime(nextFunding);
+              }
+            }
+          } catch (e) {
+            console.log('Bybit WebSocket parse error:', e);
+          }
+        };
+
+        bybitWs.onerror = (error) => {
+          console.log('Bybit WebSocket error:', error);
+          setIsBybitConnected(false);
+        };
+
+        bybitWs.onclose = () => {
+          console.log('Bybit WebSocket closed, reconnecting in 5s...');
+          setIsBybitConnected(false);
+          if (pingInterval) clearInterval(pingInterval);
+          reconnectTimeout = setTimeout(connectBybitWebSocket, 5000);
+        };
+
+        bybitWsRef.current = bybitWs;
+      } catch (error) {
+        console.log('Bybit WebSocket connection error:', error);
+        setIsBybitConnected(false);
+        reconnectTimeout = setTimeout(connectBybitWebSocket, 5000);
+      }
+    };
+
+    connectBybitWebSocket();
+
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (pingInterval) clearInterval(pingInterval);
+      if (bybitWsRef.current) {
+        bybitWsRef.current.close();
+        bybitWsRef.current = null;
+      }
+    };
   }, [useManualMode]);
 
   // ===================
@@ -208,6 +350,10 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const spread = twilightPrice - cexPrice;
   const spreadPercent = ((spread / cexPrice) * 100).toFixed(4);
 
+  // Twilight-Bybit spread (both are inverse perps)
+  const bybitSpread = bybitPrice > 0 ? twilightPrice - bybitPrice : 0;
+  const bybitSpreadPercent = bybitPrice > 0 ? ((bybitSpread / bybitPrice) * 100).toFixed(4) : '0.0000';
+
   // Calculate Twilight funding rate based on pool imbalance
   // Formula: fundingrate = ((totallong - totalshort) / allpositionsize)² / (psi * 8.0)
   function calculateTwilightFundingRate() {
@@ -223,11 +369,76 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
   const twilightFundingRate = calculateTwilightFundingRate();
 
+  // Calculate trade impact on pool skew and funding rate
+  const calculateTradeImpact = (tradeSizeUSD, direction) => {
+    const newLongs = direction === 'LONG'
+      ? twilightLongSize + tradeSizeUSD
+      : twilightLongSize;
+    const newShorts = direction === 'SHORT'
+      ? twilightShortSize + tradeSizeUSD
+      : twilightShortSize;
+
+    const totalSize = newLongs + newShorts;
+    if (totalSize === 0) return { newSkew: 0.5, newFundingRate: 0, skewChange: 0, annualizedAPY: 0, youPay: false, youEarn: false, helpsBalance: false };
+
+    const currentSkew = (twilightLongSize + twilightShortSize) > 0
+      ? twilightLongSize / (twilightLongSize + twilightShortSize)
+      : 0.5;
+    const newSkew = newLongs / totalSize;
+    const skewChange = newSkew - currentSkew;
+
+    const imbalance = (newLongs - newShorts) / totalSize;
+    const newFundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0);
+    const signedFundingRate = imbalance >= 0 ? newFundingRate : -newFundingRate;
+
+    // Annualized APY (hourly funding × 24 hours × 365 days)
+    const annualizedAPY = Math.abs(newFundingRate) * 24 * 365 * 100;
+
+    // Determine if you pay or earn
+    const longsDominate = newSkew > 0.5;
+    const youPay = direction === 'LONG' && longsDominate;
+    const youEarn = direction === 'SHORT' && longsDominate;
+
+    // Helps balance if your trade moves skew toward 50%
+    const helpsBalance = (direction === 'LONG' && currentSkew < 0.5) ||
+                         (direction === 'SHORT' && currentSkew > 0.5);
+
+    return {
+      newSkew,
+      newLongs,
+      newShorts,
+      skewChange,
+      newFundingRate: signedFundingRate,
+      annualizedAPY,
+      youPay,
+      youEarn,
+      helpsBalance
+    };
+  };
+
+  const longImpact = calculateTradeImpact(tradeSize, 'LONG');
+  const shortImpact = calculateTradeImpact(tradeSize, 'SHORT');
+  const currentSkew = (twilightLongSize + twilightShortSize) > 0
+    ? twilightLongSize / (twilightLongSize + twilightShortSize)
+    : 0.5;
+  const currentTwilightAPY = Math.abs(twilightFundingRate) * 24 * 365 * 100;
+
   // Time until next Binance funding
   const getTimeUntilFunding = () => {
     if (!nextFundingTime) return 'N/A';
     const now = Date.now();
     const diff = nextFundingTime - now;
+    if (diff <= 0) return 'Now';
+    const hours = Math.floor(diff / 3600000);
+    const minutes = Math.floor((diff % 3600000) / 60000);
+    return `${hours}h ${minutes}m`;
+  };
+
+  // Time until next Bybit funding
+  const getTimeUntilBybitFunding = () => {
+    if (!bybitNextFundingTime) return 'N/A';
+    const now = Date.now();
+    const diff = bybitNextFundingTime - now;
     if (diff <= 0) return 'Now';
     const hours = Math.floor(diff / 3600000);
     const minutes = Math.floor((diff % 3600000) / 60000);
@@ -807,8 +1018,539 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       })
     });
 
+    // ===================
+    // PROFITABLE SHORT STRATEGIES (No Double Funding Bleed)
+    // ===================
+
+    // Strategy: Stablecoin Position (SHORT only, no CEX hedge)
+    // For BTC holders who want USD-stable exposure without double funding costs
+    const stablecoinSize = Math.min(150, tvl);
+    strategies.push({
+      id: id++,
+      name: `Stablecoin Position (No Hedge)`,
+      description: `SHORT on Twilight only. No CEX hedge = no funding bleed. Creates stable USD value if you hold spot BTC. Earn funding when longs > shorts.`,
+      category: 'Capital Efficient',
+      twilightPosition: 'SHORT',
+      twilightSize: stablecoinSize,
+      twilightLeverage: 10,
+      binancePosition: null,
+      binanceSize: 0,
+      binanceLeverage: 0,
+      risk: 'LOW',
+      ...calculateStrategyAPY({
+        twilightPosition: 'SHORT', twilightSize: stablecoinSize, twilightLeverage: 10,
+        binancePosition: null, binanceSize: 0, binanceLeverage: 0
+      })
+    });
+
+    // Strategy: Funding Harvesting (SHORT when book is long-heavy)
+    // Only profitable when Twilight longs > shorts (shorts receive funding)
+    const harvestSize = Math.min(200, tvl);
+    const isLongHeavy = currentSkew > 0.55;
+    strategies.push({
+      id: id++,
+      name: `Funding Harvest ${isLongHeavy ? '✓' : '✗'} (SHORT)`,
+      description: isLongHeavy
+        ? `PROFITABLE NOW! Book is ${(currentSkew * 100).toFixed(1)}% long. Shorts EARN ${currentTwilightAPY.toFixed(1)}% APY. No CEX hedge needed.`
+        : `NOT PROFITABLE NOW. Book is ${(currentSkew * 100).toFixed(1)}% long. Wait until >55% long to SHORT.`,
+      category: 'Funding Harvest',
+      twilightPosition: 'SHORT',
+      twilightSize: harvestSize,
+      twilightLeverage: 15,
+      binancePosition: null,
+      binanceSize: 0,
+      binanceLeverage: 0,
+      risk: isLongHeavy ? 'LOW' : 'HIGH',
+      ...calculateStrategyAPY({
+        twilightPosition: 'SHORT', twilightSize: harvestSize, twilightLeverage: 15,
+        binancePosition: null, binanceSize: 0, binanceLeverage: 0
+      }),
+      // Override APY to show actual funding earned/paid
+      apy: isLongHeavy ? currentTwilightAPY : -currentTwilightAPY,
+      monthlyPnL: isLongHeavy
+        ? (harvestSize * (currentTwilightAPY / 100) / 12)
+        : -(harvestSize * (currentTwilightAPY / 100) / 12)
+    });
+
+    // Strategy: Pure LONG Position (LONG only, no CEX hedge)
+    // For traders who want leveraged BTC exposure without hedge costs
+    strategies.push({
+      id: id++,
+      name: `Leveraged Long (No Hedge)`,
+      description: `LONG on Twilight only. No CEX hedge = no funding bleed. Earn funding when shorts > longs (book is short-heavy).`,
+      category: 'Capital Efficient',
+      twilightPosition: 'LONG',
+      twilightSize: stablecoinSize,
+      twilightLeverage: 10,
+      binancePosition: null,
+      binanceSize: 0,
+      binanceLeverage: 0,
+      risk: 'MEDIUM',
+      ...calculateStrategyAPY({
+        twilightPosition: 'LONG', twilightSize: stablecoinSize, twilightLeverage: 10,
+        binancePosition: null, binanceSize: 0, binanceLeverage: 0
+      })
+    });
+
+    // Strategy: LONG Funding Harvesting (LONG when book is short-heavy)
+    const isShortHeavy = currentSkew < 0.45;
+    strategies.push({
+      id: id++,
+      name: `Funding Harvest ${isShortHeavy ? '✓' : '✗'} (LONG)`,
+      description: isShortHeavy
+        ? `PROFITABLE NOW! Book is ${(currentSkew * 100).toFixed(1)}% long. Longs EARN ${currentTwilightAPY.toFixed(1)}% APY. No CEX hedge needed.`
+        : `NOT PROFITABLE NOW. Book is ${(currentSkew * 100).toFixed(1)}% long. Wait until <45% long to go LONG.`,
+      category: 'Funding Harvest',
+      twilightPosition: 'LONG',
+      twilightSize: harvestSize,
+      twilightLeverage: 15,
+      binancePosition: null,
+      binanceSize: 0,
+      binanceLeverage: 0,
+      risk: isShortHeavy ? 'LOW' : 'HIGH',
+      ...calculateStrategyAPY({
+        twilightPosition: 'LONG', twilightSize: harvestSize, twilightLeverage: 15,
+        binancePosition: null, binanceSize: 0, binanceLeverage: 0
+      }),
+      // Override APY to show actual funding earned/paid
+      apy: isShortHeavy ? currentTwilightAPY : -currentTwilightAPY,
+      monthlyPnL: isShortHeavy
+        ? (harvestSize * (currentTwilightAPY / 100) / 12)
+        : -(harvestSize * (currentTwilightAPY / 100) / 12)
+    });
+
+    // Strategy: Dual Funding Arbitrage (Only when BOTH rates align)
+    // SHORT Twilight + SHORT Binance (only when Binance funding is negative)
+    const isBinanceNegative = binanceFundingRate < 0;
+    const isDualArbProfitable = isLongHeavy && isBinanceNegative;
+    strategies.push({
+      id: id++,
+      name: `Dual SHORT Arb ${isDualArbProfitable ? '✓✓' : '✗'}`,
+      description: isDualArbProfitable
+        ? `RARE OPPORTUNITY! Both sides pay YOU. Twilight: shorts earn (${(currentSkew * 100).toFixed(0)}% long). Binance: shorts earn (${(binanceFundingRate * 100).toFixed(4)}% negative).`
+        : `NOT PROFITABLE. Need: Twilight long-heavy (${isLongHeavy ? '✓' : '✗'}) AND Binance funding negative (${isBinanceNegative ? '✓' : '✗'}).`,
+      category: 'Dual Arb',
+      twilightPosition: 'SHORT',
+      twilightSize: harvestSize,
+      twilightLeverage: 15,
+      binancePosition: 'SHORT',
+      binanceSize: harvestSize,
+      binanceLeverage: 5,
+      risk: isDualArbProfitable ? 'LOW' : 'HIGH',
+      ...calculateStrategyAPY({
+        twilightPosition: 'SHORT', twilightSize: harvestSize, twilightLeverage: 15,
+        binancePosition: 'SHORT', binanceSize: harvestSize, binanceLeverage: 5
+      }),
+      // Override to show combined earnings when profitable
+      apy: isDualArbProfitable
+        ? currentTwilightAPY + Math.abs(binanceFundingRate * 3 * 365 * 100)
+        : -(currentTwilightAPY + Math.abs(binanceFundingRate * 3 * 365 * 100))
+    });
+
+    // Strategy: Dual LONG Arbitrage (Only when BOTH rates align opposite way)
+    const isBinancePositive = binanceFundingRate > 0.0001;
+    const isDualLongArbProfitable = isShortHeavy && isBinancePositive;
+    strategies.push({
+      id: id++,
+      name: `Dual LONG Arb ${isDualLongArbProfitable ? '✓✓' : '✗'}`,
+      description: isDualLongArbProfitable
+        ? `RARE OPPORTUNITY! Both sides pay YOU. Twilight: longs earn (${(currentSkew * 100).toFixed(0)}% short-heavy). Binance: longs earn (${(binanceFundingRate * 100).toFixed(4)}% positive).`
+        : `NOT PROFITABLE. Need: Twilight short-heavy (${isShortHeavy ? '✓' : '✗'}) AND Binance funding positive (${isBinancePositive ? '✓' : '✗'}).`,
+      category: 'Dual Arb',
+      twilightPosition: 'LONG',
+      twilightSize: harvestSize,
+      twilightLeverage: 15,
+      binancePosition: 'LONG',
+      binanceSize: harvestSize,
+      binanceLeverage: 5,
+      risk: isDualLongArbProfitable ? 'LOW' : 'HIGH',
+      ...calculateStrategyAPY({
+        twilightPosition: 'LONG', twilightSize: harvestSize, twilightLeverage: 15,
+        binancePosition: 'LONG', binanceSize: harvestSize, binanceLeverage: 5
+      }),
+      apy: isDualLongArbProfitable
+        ? currentTwilightAPY + Math.abs(binanceFundingRate * 3 * 365 * 100)
+        : -(currentTwilightAPY + Math.abs(binanceFundingRate * 3 * 365 * 100))
+    });
+
+    // ===================
+    // BYBIT INVERSE BTCUSD STRATEGIES
+    // Both Twilight and Bybit are inverse (BTC-margined) perpetuals
+    // This creates true BTC-denominated delta-neutral positions
+    // ===================
+    if (bybitPrice > 0) {
+      const BYBIT_TAKER_FEE = 0.00055; // 0.055% taker fee
+      const bybitAnnualizedFunding = Math.abs(bybitFundingRate) * 3 * 365 * 100; // Bybit has 3 funding payments per day
+      const isBybitNegative = bybitFundingRate < 0;
+      const isBybitPositive = bybitFundingRate > 0.00005;
+
+      // Calculate full strategy metrics for Bybit inverse strategies
+      const calculateBybitStrategy = (twilightPos, twilightSize, twilightLev, bybitPos, bybitSize, bybitLev) => {
+        // Twilight margin (BTC-margined inverse perp)
+        const twilightMarginBTC = twilightSize / (twilightLev * btcPrice);
+        const twilightMarginUSD = twilightMarginBTC * btcPrice;
+
+        // Bybit margin (BTC-margined inverse perp)
+        const bybitMarginBTC = bybitSize / (bybitLev * bybitPrice);
+        const bybitMarginUSD = bybitMarginBTC * bybitPrice;
+
+        // Total margin in USD
+        const totalMargin = twilightMarginUSD + bybitMarginUSD;
+
+        // Twilight funding calculation
+        const twilightFundingEarned = twilightPos === 'LONG'
+          ? (isShortHeavy ? currentTwilightAPY : -currentTwilightAPY)
+          : (isLongHeavy ? currentTwilightAPY : -currentTwilightAPY);
+
+        // Bybit funding calculation
+        const bybitFundingEarned = bybitPos === 'LONG'
+          ? (isBybitNegative ? bybitAnnualizedFunding : -bybitAnnualizedFunding)
+          : (isBybitPositive ? bybitAnnualizedFunding : -bybitAnnualizedFunding);
+
+        // Combined APY
+        const combinedAPY = twilightFundingEarned + bybitFundingEarned;
+
+        // Monthly funding P&L
+        const twilightMonthlyFunding = twilightSize * (twilightFundingEarned / 100) / 12;
+        const bybitMonthlyFunding = bybitSize * (bybitFundingEarned / 100) / 12;
+        const monthlyFundingPnL = twilightMonthlyFunding + bybitMonthlyFunding;
+
+        // Fees (Bybit only - Twilight is 0%)
+        const bybitFees = bybitSize * BYBIT_TAKER_FEE * 2; // Entry + exit
+        const totalFees = bybitFees;
+
+        // Monthly P&L
+        const monthlyPnL = monthlyFundingPnL - (totalFees / 12);
+
+        // P&L at different price moves (delta-neutral so price P&L should cancel)
+        // For inverse perps, both positions move in BTC terms
+        const pnlUp5 = monthlyPnL; // Delta neutral
+        const pnlUp10 = monthlyPnL;
+        const pnlDown5 = monthlyPnL;
+        const pnlDown10 = monthlyPnL;
+
+        // Liquidation prices
+        const twilightLiqPct = 100 / twilightLev * 0.9;
+        const twilightLiqPrice = twilightPos === 'LONG'
+          ? btcPrice * (1 - twilightLiqPct / 100)
+          : btcPrice * (1 + twilightLiqPct / 100);
+
+        const bybitLiqPct = 100 / bybitLev * 0.9;
+        const bybitLiqPrice = bybitPos === 'LONG'
+          ? bybitPrice * (1 - bybitLiqPct / 100)
+          : bybitPrice * (1 + bybitLiqPct / 100);
+
+        return {
+          twilightMarginBTC,
+          twilightMarginUSD,
+          bybitMarginBTC,
+          bybitMarginUSD,
+          totalMargin,
+          monthlyFundingPnL,
+          basisProfit: 0, // No basis profit for same-direction hedge
+          totalFees,
+          monthlyPnL,
+          apy: (monthlyPnL / totalMargin) * 12 * 100,
+          pnlUp5,
+          pnlUp10,
+          pnlDown5,
+          pnlDown10,
+          priceOnlyUp5: 0,
+          priceOnlyUp10: 0,
+          priceOnlyDown5: 0,
+          priceOnlyDown10: 0,
+          marginChangeUp5: 0,
+          marginChangeUp10: 0,
+          marginChangeDown5: 0,
+          marginChangeDown10: 0,
+          twilightLiquidationPrice: twilightLiqPrice,
+          twilightLiquidationPct: twilightLiqPct,
+          bybitLiquidationPrice: bybitLiqPrice,
+          bybitLiquidationPct: bybitLiqPct,
+          twilightStopLoss: twilightPos === 'LONG' ? twilightLiqPrice * 1.1 : twilightLiqPrice * 0.9,
+          twilightStopLossPct: twilightLiqPct * 0.8,
+          totalMaxLoss: totalMargin * 0.1,
+          breakEvenDays: totalFees > 0 ? Math.ceil(totalFees / (monthlyFundingPnL / 30)) : 1
+        };
+      };
+
+      // Strategy 1: SHORT Twilight + LONG Bybit Inverse (10x)
+      const bybitSize1 = Math.min(200, tvl);
+      const strat1 = calculateBybitStrategy('SHORT', bybitSize1, 10, 'LONG', bybitSize1, 10);
+      const isShortTwiLongBybitProfitable = isLongHeavy && isBybitNegative;
+
+      strategies.push({
+        id: id++,
+        name: `Inverse Arb: Short Twi / Long Bybit ${isShortTwiLongBybitProfitable ? '✓✓' : ''}`,
+        description: isShortTwiLongBybitProfitable
+          ? `INVERSE PERP ARB! Both BTC-margined. Twilight shorts earn (${(currentSkew * 100).toFixed(0)}% long). Bybit longs earn (${(bybitFundingRate * 100).toFixed(4)}% negative). True BTC delta-neutral.`
+          : `Inverse perp hedge. Twilight: ${isLongHeavy ? 'shorts earn ✓' : 'shorts pay ✗'}. Bybit: ${isBybitNegative ? 'longs earn ✓' : 'longs pay ✗'}. Both BTC-margined = no USD conversion risk.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: bybitSize1,
+        twilightLeverage: 10,
+        binancePosition: 'LONG', // Use binance fields for Bybit to work with existing UI
+        binanceSize: bybitSize1,
+        binanceLeverage: 10,
+        risk: isShortTwiLongBybitProfitable ? 'LOW' : 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat1
+      });
+
+      // Strategy 2: LONG Twilight + SHORT Bybit Inverse (10x)
+      const strat2 = calculateBybitStrategy('LONG', bybitSize1, 10, 'SHORT', bybitSize1, 10);
+      const isLongTwiShortBybitProfitable = isShortHeavy && isBybitPositive;
+
+      strategies.push({
+        id: id++,
+        name: `Inverse Arb: Long Twi / Short Bybit ${isLongTwiShortBybitProfitable ? '✓✓' : ''}`,
+        description: isLongTwiShortBybitProfitable
+          ? `INVERSE PERP ARB! Both BTC-margined. Twilight longs earn (${(currentSkew * 100).toFixed(0)}% short-heavy). Bybit shorts earn (${(bybitFundingRate * 100).toFixed(4)}% positive). True BTC delta-neutral.`
+          : `Inverse perp hedge. Twilight: ${isShortHeavy ? 'longs earn ✓' : 'longs pay ✗'}. Bybit: ${isBybitPositive ? 'shorts earn ✓' : 'shorts pay ✗'}. Both BTC-margined = no USD conversion risk.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'LONG',
+        twilightSize: bybitSize1,
+        twilightLeverage: 10,
+        binancePosition: 'SHORT',
+        binanceSize: bybitSize1,
+        binanceLeverage: 10,
+        risk: isLongTwiShortBybitProfitable ? 'LOW' : 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat2
+      });
+
+      // Strategy 3: Max Leverage (20x)
+      const maxInverseSize = Math.min(300, tvl);
+      const strat3 = calculateBybitStrategy('SHORT', maxInverseSize, 20, 'LONG', maxInverseSize, 20);
+
+      strategies.push({
+        id: id++,
+        name: `Max Inverse Arb 20x: Short Twi / Long Bybit`,
+        description: `Maximum leverage inverse arb. Both platforms BTC-margined. Position: $${maxInverseSize} each side @ 20x. Delta-neutral in BTC terms.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: maxInverseSize,
+        twilightLeverage: 20,
+        binancePosition: 'LONG',
+        binanceSize: maxInverseSize,
+        binanceLeverage: 20,
+        risk: 'HIGH',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat3
+      });
+
+      // Strategy 4: Conservative (5x)
+      const strat4 = calculateBybitStrategy('SHORT', 100, 5, 'LONG', 100, 5);
+
+      strategies.push({
+        id: id++,
+        name: `Conservative Inverse 5x: Short Twi / Long Bybit`,
+        description: `Low leverage inverse arb for safety. Both BTC-margined. Lower liquidation risk. Good for beginners.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: 100,
+        twilightLeverage: 5,
+        binancePosition: 'LONG',
+        binanceSize: 100,
+        binanceLeverage: 5,
+        risk: 'LOW',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat4
+      });
+
+      // Strategy 5: High Funding Capture 15x
+      const strat5 = calculateBybitStrategy('SHORT', 200, 15, 'LONG', 200, 15);
+
+      strategies.push({
+        id: id++,
+        name: `Funding Capture 15x: Short Twi / Long Bybit ${isShortTwiLongBybitProfitable ? '✓' : ''}`,
+        description: `Higher leverage (15x) for amplified funding capture. Both BTC-margined inverse perps. Moderate liquidation risk with higher returns.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: 200,
+        twilightLeverage: 15,
+        binancePosition: 'LONG',
+        binanceSize: 200,
+        binanceLeverage: 15,
+        risk: 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat5
+      });
+
+      // Strategy 6: Large Position 10x ($500)
+      const largeSize = Math.min(500, tvl);
+      const strat6 = calculateBybitStrategy('SHORT', largeSize, 10, 'LONG', largeSize, 10);
+
+      strategies.push({
+        id: id++,
+        name: `Large Inverse Arb 10x: Short Twi / Long Bybit`,
+        description: `Larger $${largeSize} position @ 10x on both sides. More absolute profit potential with standard risk.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: largeSize,
+        twilightLeverage: 10,
+        binancePosition: 'LONG',
+        binanceSize: largeSize,
+        binanceLeverage: 10,
+        risk: 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat6
+      });
+
+      // Strategy 7: Mini Position 3x (Very Conservative)
+      const strat7 = calculateBybitStrategy('SHORT', 50, 3, 'LONG', 50, 3);
+
+      strategies.push({
+        id: id++,
+        name: `Mini Inverse 3x: Short Twi / Long Bybit`,
+        description: `Minimal leverage (3x) for beginners. Very low liquidation risk. $50 position. Learn inverse perp arb safely.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: 50,
+        twilightLeverage: 3,
+        binancePosition: 'LONG',
+        binanceSize: 50,
+        binanceLeverage: 3,
+        risk: 'VERY LOW',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat7
+      });
+
+      // Strategy 8: Asymmetric Leverage (5x Twi / 10x Bybit)
+      // Lower leverage on Twilight for safety, higher on Bybit for returns
+      const strat8 = calculateBybitStrategy('SHORT', 150, 5, 'LONG', 150, 10);
+
+      strategies.push({
+        id: id++,
+        name: `Asymmetric 5x/10x: Short Twi / Long Bybit`,
+        description: `Lower leverage on Twilight (5x) for safety, higher on Bybit (10x). Asymmetric risk profile. Safer on shorts.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: 150,
+        twilightLeverage: 5,
+        binancePosition: 'LONG',
+        binanceSize: 150,
+        binanceLeverage: 10,
+        risk: 'LOW',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat8
+      });
+
+      // Strategy 9: Spread Capture Strategy
+      // When Twilight-Bybit spread is significant, capture the price difference
+      const spreadBps = bybitPrice > 0 ? Math.abs((twilightPrice - bybitPrice) / bybitPrice * 10000) : 0;
+      const isSpreadSignificant = spreadBps > 5; // >5 bps spread
+      const strat9 = calculateBybitStrategy('SHORT', 300, 10, 'LONG', 300, 10);
+
+      strategies.push({
+        id: id++,
+        name: `Spread Capture 10x ${isSpreadSignificant ? '📈' : ''}`,
+        description: isSpreadSignificant
+          ? `SPREAD OPPORTUNITY! ${spreadBps.toFixed(1)} bps spread. Short higher-priced venue, long lower-priced. Spread: $${Math.abs(twilightPrice - bybitPrice).toFixed(2)}`
+          : `Capture price spread between venues. Current spread: ${spreadBps.toFixed(1)} bps. More profitable when spread widens.`,
+        category: 'Bybit Inverse',
+        twilightPosition: twilightPrice > bybitPrice ? 'SHORT' : 'LONG',
+        twilightSize: 300,
+        twilightLeverage: 10,
+        binancePosition: twilightPrice > bybitPrice ? 'LONG' : 'SHORT',
+        binanceSize: 300,
+        binanceLeverage: 10,
+        risk: 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        spreadBps,
+        ...strat9
+      });
+
+      // Strategy 10: Funding Differential Capture
+      // Pure funding arbitrage - earn from both platforms when funding aligns
+      const twilightHourlyFunding = currentTwilightAPY / (365 * 24) * 100;
+      const bybitHourlyFunding = bybitAnnualizedFunding / (365 * 24);
+      const fundingDiff = Math.abs(twilightHourlyFunding - bybitHourlyFunding);
+      const isFundingDiffLarge = fundingDiff > 0.001;
+      const strat10 = calculateBybitStrategy('SHORT', 250, 10, 'LONG', 250, 10);
+
+      strategies.push({
+        id: id++,
+        name: `Funding Diff Capture ${isFundingDiffLarge ? '💰' : ''}`,
+        description: `Capture funding rate differential. Twilight: ${twilightHourlyFunding.toFixed(4)}%/hr. Bybit: ${bybitHourlyFunding.toFixed(4)}%/hr. Diff: ${fundingDiff.toFixed(4)}%/hr.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'SHORT',
+        twilightSize: 250,
+        twilightLeverage: 10,
+        binancePosition: 'LONG',
+        binanceSize: 250,
+        binanceLeverage: 10,
+        risk: 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        fundingDiff,
+        ...strat10
+      });
+
+      // Strategy 11: Reverse Large Position (Long Twi / Short Bybit)
+      const strat11 = calculateBybitStrategy('LONG', largeSize, 10, 'SHORT', largeSize, 10);
+
+      strategies.push({
+        id: id++,
+        name: `Large Reverse Arb 10x: Long Twi / Short Bybit ${isLongTwiShortBybitProfitable ? '✓' : ''}`,
+        description: `Larger $${largeSize} reverse position. Long Twilight + Short Bybit. Profitable when shorts dominate Twilight & Bybit positive funding.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'LONG',
+        twilightSize: largeSize,
+        twilightLeverage: 10,
+        binancePosition: 'SHORT',
+        binanceSize: largeSize,
+        binanceLeverage: 10,
+        risk: isLongTwiShortBybitProfitable ? 'LOW' : 'MEDIUM',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat11
+      });
+
+      // Strategy 12: Conservative Reverse (5x)
+      const strat12 = calculateBybitStrategy('LONG', 100, 5, 'SHORT', 100, 5);
+
+      strategies.push({
+        id: id++,
+        name: `Conservative Reverse 5x: Long Twi / Short Bybit`,
+        description: `Low leverage reverse position. Long Twilight + Short Bybit. Good when Twilight shorts dominate.`,
+        category: 'Bybit Inverse',
+        twilightPosition: 'LONG',
+        twilightSize: 100,
+        twilightLeverage: 5,
+        binancePosition: 'SHORT',
+        binanceSize: 100,
+        binanceLeverage: 5,
+        risk: 'LOW',
+        isBybitStrategy: true,
+        bybitPrice,
+        bybitFundingRate,
+        ...strat12
+      });
+    }
+
     return strategies.sort((a, b) => b.apy - a.apy);
-  }, [twilightPrice, cexPrice, spread, binanceFundingRate, twilightFundingRate, tvl]);
+  }, [twilightPrice, cexPrice, spread, binanceFundingRate, twilightFundingRate, tvl, currentSkew, currentTwilightAPY, bybitPrice, bybitFundingRate]);
 
   // ===================
   // RENDER HELPERS
@@ -838,6 +1580,10 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       case 'Directional': return 'bg-red-100 text-red-800';
       case 'Conservative': return 'bg-green-100 text-green-800';
       case 'CEX Only': return 'bg-gray-100 text-gray-800';
+      case 'Capital Efficient': return 'bg-emerald-100 text-emerald-800';
+      case 'Funding Harvest': return 'bg-amber-100 text-amber-800';
+      case 'Dual Arb': return 'bg-cyan-100 text-cyan-800';
+      case 'Bybit Inverse': return 'bg-violet-100 text-violet-800';
       default: return 'bg-gray-100 text-gray-800';
     }
   };
@@ -884,6 +1630,10 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               {isMarkPriceConnected ? <Wifi className="w-4 h-4 text-green-500" /> : <WifiOff className="w-4 h-4 text-red-500" />}
               <span className="text-xs">Funding</span>
             </div>
+            <div className="flex items-center gap-1">
+              {isBybitConnected ? <Wifi className="w-4 h-4 text-green-500" /> : <WifiOff className="w-4 h-4 text-red-500" />}
+              <span className="text-xs">Bybit</span>
+            </div>
             <button
               onClick={() => setUseManualMode(!useManualMode)}
               className={`px-2 py-1 rounded text-xs font-semibold ${
@@ -897,7 +1647,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       </div>
 
       {/* Market Data Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
         <div className="bg-white rounded-lg p-3 shadow">
           <div className="text-xs text-slate-500">Twilight (Spot)</div>
           <div className="text-xl font-bold text-blue-600">${twilightPrice.toLocaleString()}</div>
@@ -905,17 +1655,33 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         </div>
 
         <div className="bg-white rounded-lg p-3 shadow">
-          <div className="text-xs text-slate-500">Binance Perp</div>
+          <div className="text-xs text-slate-500">Binance Perp (Linear)</div>
           <div className="text-xl font-bold text-purple-600">${cexPrice.toLocaleString()}</div>
           <div className="text-xs text-slate-400">{lastFuturesUpdate || 'Connecting...'}</div>
         </div>
 
+        <div className="bg-white rounded-lg p-3 shadow border-2 border-violet-200">
+          <div className="text-xs text-slate-500">Bybit Inverse BTCUSD</div>
+          <div className="text-xl font-bold text-violet-600">
+            {bybitPrice > 0 ? `$${bybitPrice.toLocaleString()}` : 'Connecting...'}
+          </div>
+          <div className="text-xs text-slate-400">{lastBybitUpdate || 'Waiting...'}</div>
+        </div>
+
         <div className="bg-white rounded-lg p-3 shadow">
-          <div className="text-xs text-slate-500">Spread</div>
+          <div className="text-xs text-slate-500">Spread (Twi-Bin)</div>
           <div className={`text-xl font-bold ${spread >= 0 ? 'text-green-600' : 'text-red-600'}`}>
             {spread >= 0 ? '+' : ''}{spreadPercent}%
           </div>
           <div className="text-xs text-slate-400">${spread.toFixed(2)}</div>
+        </div>
+
+        <div className="bg-white rounded-lg p-3 shadow border-2 border-violet-200">
+          <div className="text-xs text-slate-500">Spread (Twi-Bybit)</div>
+          <div className={`text-xl font-bold ${bybitSpread >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            {bybitSpread >= 0 ? '+' : ''}{bybitSpreadPercent}%
+          </div>
+          <div className="text-xs text-slate-400">${bybitSpread.toFixed(2)}</div>
         </div>
 
         <div className="bg-white rounded-lg p-3 shadow">
@@ -925,7 +1691,54 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           </div>
           <div className="text-xs text-slate-400">Next: {getTimeUntilFunding()}</div>
         </div>
+
+        <div className="bg-white rounded-lg p-3 shadow border-2 border-violet-200">
+          <div className="text-xs text-slate-500">Bybit Funding (8h)</div>
+          <div className={`text-xl font-bold ${bybitFundingRate >= 0 ? 'text-orange-600' : 'text-blue-600'}`}>
+            {bybitFundingRate >= 0 ? '+' : ''}{(bybitFundingRate * 100).toFixed(4)}%
+          </div>
+          <div className="text-xs text-slate-400">Next: {getTimeUntilBybitFunding()} | APY: {(Math.abs(bybitFundingRate) * 3 * 365 * 100).toFixed(1)}%</div>
+        </div>
       </div>
+
+      {/* Twilight-Bybit Arbitrage Opportunity Banner */}
+      {bybitPrice > 0 && (
+        <div className={`rounded-lg p-4 shadow mb-6 ${Math.abs(parseFloat(bybitSpreadPercent)) > 0.05 ? 'bg-gradient-to-r from-violet-100 to-purple-100 border-2 border-violet-300' : 'bg-white'}`}>
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-3">
+              <Activity className="w-6 h-6 text-violet-600" />
+              <div>
+                <div className="font-bold text-slate-800">Twilight ↔ Bybit Inverse Arbitrage</div>
+                <div className="text-sm text-slate-600">
+                  Spread: <span className={`font-bold ${bybitSpread >= 0 ? 'text-green-600' : 'text-red-600'}`}>{bybitSpread >= 0 ? '+' : ''}{bybitSpreadPercent}%</span>
+                  {' '}| Combined APY: <span className="font-bold text-violet-600">{(currentTwilightAPY + Math.abs(bybitFundingRate) * 3 * 365 * 100).toFixed(1)}%</span>
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Twilight: <span className={currentSkew > 0.5 ? 'text-green-600' : 'text-red-600'}>{currentSkew > 0.5 ? 'Shorts earn' : 'Longs earn'}</span>
+                  {' '}| Bybit: <span className={bybitFundingRate > 0 ? 'text-green-600' : 'text-red-600'}>{bybitFundingRate > 0 ? 'Shorts earn' : 'Longs earn'}</span>
+                  {' '}| Best: <span className="font-bold text-violet-700">
+                    {currentSkew > 0.5 && bybitFundingRate < 0 ? 'Short Twi + Long Bybit ✓✓' :
+                     currentSkew <= 0.5 && bybitFundingRate > 0 ? 'Long Twi + Short Bybit ✓✓' :
+                     currentSkew > 0.5 ? 'Short Twi + Long Bybit ✓' : 'Long Twi + Short Bybit ✓'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              {Math.abs(parseFloat(bybitSpreadPercent)) > 0.05 && (
+                <span className="px-3 py-1 bg-violet-500 text-white rounded-full text-sm font-bold animate-pulse">
+                  SPREAD
+                </span>
+              )}
+              {(currentSkew > 0.5 && bybitFundingRate < 0) || (currentSkew <= 0.5 && bybitFundingRate > 0) ? (
+                <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm font-bold">
+                  DOUBLE EARN
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TVL and Pool State Settings */}
       <div className="bg-white rounded-lg p-4 shadow mb-6">
@@ -992,6 +1805,182 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         )}
       </div>
 
+      {/* Pool Balance Gauge */}
+      <div className="bg-white rounded-lg p-4 shadow mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Activity className="w-5 h-5 text-purple-600" />
+          <h3 className="font-bold text-slate-800">Pool Balance</h3>
+          <span className={`ml-auto px-3 py-1 rounded-full text-sm font-bold ${
+            currentSkew > 0.55 ? 'bg-orange-100 text-orange-700' :
+            currentSkew < 0.45 ? 'bg-blue-100 text-blue-700' :
+            'bg-green-100 text-green-700'
+          }`}>
+            {currentSkew > 0.55 ? 'SHORTS EARN' : currentSkew < 0.45 ? 'LONGS EARN' : 'BALANCED'}
+          </span>
+        </div>
+
+        {/* Visual Gauge */}
+        <div className="relative h-8 bg-gradient-to-r from-blue-200 via-green-200 to-orange-200 rounded-full overflow-hidden mb-2">
+          <div
+            className="absolute top-0 h-full w-1 bg-slate-800 z-10"
+            style={{ left: `${currentSkew * 100}%`, transform: 'translateX(-50%)' }}
+          />
+          <div className="absolute top-0 left-1/2 h-full w-0.5 bg-slate-400 z-5" />
+          <div
+            className="absolute top-1 left-0 h-6 rounded-full bg-blue-500/30"
+            style={{ width: `${(1 - currentSkew) * 100}%`, right: 0, left: 'auto' }}
+          />
+          <div
+            className="absolute top-1 h-6 rounded-full bg-orange-500/30"
+            style={{ width: `${currentSkew * 100}%` }}
+          />
+        </div>
+        <div className="flex justify-between text-xs text-slate-500 mb-4">
+          <span>0% (All Shorts)</span>
+          <span className="font-bold text-slate-700">{(currentSkew * 100).toFixed(1)}% Longs</span>
+          <span>100% (All Longs)</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-4 text-center">
+          <div className="bg-blue-50 rounded-lg p-3">
+            <div className="text-blue-600 text-xs">Total Shorts</div>
+            <div className="text-xl font-bold text-blue-700">${twilightShortSize.toLocaleString()}</div>
+          </div>
+          <div className={`rounded-lg p-3 ${currentSkew > 0.5 ? 'bg-orange-100' : currentSkew < 0.5 ? 'bg-blue-100' : 'bg-green-100'}`}>
+            <div className={`text-xs ${currentSkew > 0.5 ? 'text-orange-600' : currentSkew < 0.5 ? 'text-blue-600' : 'text-green-600'}`}>
+              Current Funding APY
+            </div>
+            <div className={`text-xl font-bold ${currentSkew > 0.5 ? 'text-orange-700' : currentSkew < 0.5 ? 'text-blue-700' : 'text-green-700'}`}>
+              {currentTwilightAPY.toFixed(1)}%
+            </div>
+            <div className="text-xs text-slate-500">
+              {currentSkew > 0.5 ? 'Shorts earn, Longs pay' : currentSkew < 0.5 ? 'Longs earn, Shorts pay' : 'No funding'}
+            </div>
+          </div>
+          <div className="bg-orange-50 rounded-lg p-3">
+            <div className="text-orange-600 text-xs">Total Longs</div>
+            <div className="text-xl font-bold text-orange-700">${twilightLongSize.toLocaleString()}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Trade Impact Calculator */}
+      {(twilightLongSize > 0 || twilightShortSize > 0) && (
+        <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-4 shadow mb-6 border-2 border-purple-200">
+          <div className="flex items-center gap-2 mb-4">
+            <TrendingUp className="w-5 h-5 text-purple-600" />
+            <h3 className="font-bold text-slate-800">Trade Impact Calculator</h3>
+            <Info className="w-4 h-4 text-slate-400" />
+          </div>
+
+          {/* Trade Size Input */}
+          <div className="mb-4">
+            <label className="block text-sm text-slate-600 mb-1">Your Trade Size ($)</label>
+            <input
+              type="number"
+              value={tradeSize}
+              onChange={(e) => setTradeSize(Number(e.target.value))}
+              className="w-full px-3 py-2 border-2 border-purple-300 rounded-lg text-lg font-bold"
+              placeholder="Enter position size in USD"
+            />
+          </div>
+
+          {/* Side by Side Comparison */}
+          <div className="grid grid-cols-2 gap-4">
+            {/* IF YOU GO LONG */}
+            <div className={`rounded-xl p-4 border-2 ${longImpact.youPay ? 'bg-red-50 border-red-300' : 'bg-green-50 border-green-300'}`}>
+              <div className="flex items-center gap-2 mb-3">
+                <ArrowUpRight className={`w-6 h-6 ${longImpact.youPay ? 'text-red-600' : 'text-green-600'}`} />
+                <span className="font-bold text-lg">IF YOU GO LONG ${tradeSize.toLocaleString()}</span>
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Pool:</span>
+                  <span className="font-mono">${longImpact.newLongs?.toLocaleString()} / ${longImpact.newShorts?.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Skew:</span>
+                  <span className={`font-bold ${longImpact.skewChange > 0 ? 'text-orange-600' : 'text-blue-600'}`}>
+                    {(longImpact.newSkew * 100).toFixed(1)}% ({longImpact.skewChange > 0 ? '+' : ''}{(longImpact.skewChange * 100).toFixed(1)}%)
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Funding Rate:</span>
+                  <span className="font-mono">{(longImpact.newFundingRate * 100).toFixed(4)}%/hr</span>
+                </div>
+                <div className={`rounded-lg p-3 mt-3 ${longImpact.youPay ? 'bg-red-100' : 'bg-green-100'}`}>
+                  <div className={`text-xs ${longImpact.youPay ? 'text-red-600' : 'text-green-600'}`}>
+                    {longImpact.youPay ? 'YOU PAY' : 'YOU EARN'}
+                  </div>
+                  <div className={`text-2xl font-bold ${longImpact.youPay ? 'text-red-700' : 'text-green-700'}`}>
+                    {longImpact.annualizedAPY.toFixed(1)}% APY
+                  </div>
+                </div>
+              </div>
+
+              <div className={`mt-3 flex items-center gap-2 text-sm ${longImpact.helpsBalance ? 'text-green-600' : 'text-orange-600'}`}>
+                {longImpact.helpsBalance ? (
+                  <><span className="text-lg">+</span> Helps balance pool</>
+                ) : (
+                  <><AlertCircle className="w-4 h-4" /> Increases imbalance</>
+                )}
+              </div>
+            </div>
+
+            {/* IF YOU GO SHORT */}
+            <div className={`rounded-xl p-4 border-2 ${shortImpact.youEarn ? 'bg-green-50 border-green-300' : 'bg-red-50 border-red-300'}`}>
+              <div className="flex items-center gap-2 mb-3">
+                <ArrowDownRight className={`w-6 h-6 ${shortImpact.youEarn ? 'text-green-600' : 'text-red-600'}`} />
+                <span className="font-bold text-lg">IF YOU GO SHORT ${tradeSize.toLocaleString()}</span>
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Pool:</span>
+                  <span className="font-mono">${shortImpact.newLongs?.toLocaleString()} / ${shortImpact.newShorts?.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Skew:</span>
+                  <span className={`font-bold ${shortImpact.skewChange < 0 ? 'text-blue-600' : 'text-orange-600'}`}>
+                    {(shortImpact.newSkew * 100).toFixed(1)}% ({shortImpact.skewChange > 0 ? '+' : ''}{(shortImpact.skewChange * 100).toFixed(1)}%)
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">New Funding Rate:</span>
+                  <span className="font-mono">{(shortImpact.newFundingRate * 100).toFixed(4)}%/hr</span>
+                </div>
+                <div className={`rounded-lg p-3 mt-3 ${shortImpact.youEarn ? 'bg-green-100' : 'bg-red-100'}`}>
+                  <div className={`text-xs ${shortImpact.youEarn ? 'text-green-600' : 'text-red-600'}`}>
+                    {shortImpact.youEarn ? 'YOU EARN' : 'YOU PAY'}
+                  </div>
+                  <div className={`text-2xl font-bold ${shortImpact.youEarn ? 'text-green-700' : 'text-red-700'}`}>
+                    {shortImpact.annualizedAPY.toFixed(1)}% APY
+                  </div>
+                </div>
+              </div>
+
+              <div className={`mt-3 flex items-center gap-2 text-sm ${shortImpact.helpsBalance ? 'text-green-600' : 'text-orange-600'}`}>
+                {shortImpact.helpsBalance ? (
+                  <><span className="text-lg">+</span> Helps balance pool</>
+                ) : (
+                  <><AlertCircle className="w-4 h-4" /> Increases imbalance</>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Gaming Warning */}
+          <div className="mt-4 bg-yellow-100 rounded-lg p-3 border border-yellow-300">
+            <div className="flex items-center gap-2 text-yellow-800 text-sm">
+              <AlertCircle className="w-4 h-4" />
+              <span className="font-semibold">Gaming Risk:</span>
+              <span>Funding rate may change as other traders enter positions. The APY shown is based on your trade only.</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Funding Rate Chart */}
       {fundingHistory.length > 3 && (
         <div className="bg-white rounded-lg p-4 shadow mb-6">
@@ -1034,24 +2023,32 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         </ResponsiveContainer>
       </div>
 
-      {/* All 20 Strategies Table */}
-      <div className="bg-white rounded-lg p-4 shadow mb-6">
-        <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-          <DollarSign className="w-5 h-5 text-green-600" />
-          All 20 Trading Strategies
-        </h3>
-        <p className="text-xs text-slate-500 mb-4">
-          APY shown assumes flat price. Click "Details" to see P&L at different price movements.
-        </p>
+      {/* LONG Twilight Strategies Table */}
+      <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg p-4 shadow mb-6 border-2 border-green-200">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+            <ArrowUpRight className="w-5 h-5 text-green-600" />
+            LONG on Twilight Strategies
+          </h3>
+          {currentSkew < 0.5 && (twilightLongSize > 0 || twilightShortSize > 0) && (
+            <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm font-bold animate-pulse">
+              EARNS {currentTwilightAPY.toFixed(1)}% APY
+            </span>
+          )}
+          {currentSkew > 0.5 && (twilightLongSize > 0 || twilightShortSize > 0) && (
+            <span className="px-3 py-1 bg-red-500 text-white rounded-full text-sm font-bold">
+              PAYS {currentTwilightAPY.toFixed(1)}% APY
+            </span>
+          )}
+        </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-slate-50">
+              <tr className="border-b bg-green-100">
                 <th className="text-left p-2">#</th>
                 <th className="text-left p-2">Strategy</th>
                 <th className="text-center p-2">Category</th>
-                <th className="text-center p-2">Direction</th>
                 <th className="text-left p-2">Risk</th>
                 <th className="text-right p-2">Margin</th>
                 <th className="text-right p-2">Monthly P&L</th>
@@ -1062,10 +2059,12 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               </tr>
             </thead>
             <tbody>
-              {generateStrategies.map((strategy, idx) => (
+              {generateStrategies
+                .filter(s => s.twilightPosition === 'LONG')
+                .map((strategy, idx) => (
                 <tr
                   key={strategy.id}
-                  className={`border-b hover:bg-slate-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-blue-50' : ''}`}
+                  className={`border-b hover:bg-green-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-green-100' : ''}`}
                   onClick={() => setSelectedStrategy(strategy)}
                 >
                   <td className="p-2 text-slate-400">{idx + 1}</td>
@@ -1076,16 +2075,6 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                   <td className="p-2 text-center">
                     <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
                       {strategy.category}
-                    </span>
-                  </td>
-                  <td className="p-2 text-center">
-                    <span className={`px-2 py-1 rounded text-xs font-bold ${
-                      strategy.marketDirection === 'BULLISH' ? 'bg-green-500 text-white' :
-                      strategy.marketDirection === 'BEARISH' ? 'bg-red-500 text-white' :
-                      'bg-gray-500 text-white'
-                    }`}>
-                      {strategy.marketDirection === 'BULLISH' ? '↑ BULL' :
-                       strategy.marketDirection === 'BEARISH' ? '↓ BEAR' : '↔ NEUTRAL'}
                     </span>
                   </td>
                   <td className="p-2">
@@ -1108,7 +2097,169 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                   </td>
                   <td className="p-2 text-center">
                     <button
-                      className="px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600"
+                      className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600"
+                      onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
+                    >
+                      Details
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* SHORT Twilight Strategies Table */}
+      <div className="bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 shadow mb-6 border-2 border-red-200">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+            <ArrowDownRight className="w-5 h-5 text-red-600" />
+            SHORT on Twilight Strategies
+          </h3>
+          {currentSkew > 0.5 && (twilightLongSize > 0 || twilightShortSize > 0) && (
+            <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm font-bold animate-pulse">
+              EARNS {currentTwilightAPY.toFixed(1)}% APY
+            </span>
+          )}
+          {currentSkew < 0.5 && (twilightLongSize > 0 || twilightShortSize > 0) && (
+            <span className="px-3 py-1 bg-red-500 text-white rounded-full text-sm font-bold">
+              PAYS {currentTwilightAPY.toFixed(1)}% APY
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-red-100">
+                <th className="text-left p-2">#</th>
+                <th className="text-left p-2">Strategy</th>
+                <th className="text-center p-2">Category</th>
+                <th className="text-left p-2">Risk</th>
+                <th className="text-right p-2">Margin</th>
+                <th className="text-right p-2">Monthly P&L</th>
+                <th className="text-right p-2">APY</th>
+                <th className="text-right p-2 text-green-700">If +5%</th>
+                <th className="text-right p-2 text-red-700">If -5%</th>
+                <th className="text-center p-2">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {generateStrategies
+                .filter(s => s.twilightPosition === 'SHORT')
+                .map((strategy, idx) => (
+                <tr
+                  key={strategy.id}
+                  className={`border-b hover:bg-red-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-red-100' : ''}`}
+                  onClick={() => setSelectedStrategy(strategy)}
+                >
+                  <td className="p-2 text-slate-400">{idx + 1}</td>
+                  <td className="p-2">
+                    <div className="font-medium text-slate-800">{strategy.name}</div>
+                    <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
+                  </td>
+                  <td className="p-2 text-center">
+                    <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
+                      {strategy.category}
+                    </span>
+                  </td>
+                  <td className="p-2">
+                    <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
+                      {strategy.risk}
+                    </span>
+                  </td>
+                  <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
+                  <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
+                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
+                  </td>
+                  <td className="p-2 text-center">
+                    <button
+                      className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                      onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
+                    >
+                      Details
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Binance Only Strategies Table */}
+      <div className="bg-white rounded-lg p-4 shadow mb-6">
+        <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <DollarSign className="w-5 h-5 text-purple-600" />
+          Binance Only Strategies (No Twilight)
+        </h3>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-slate-50">
+                <th className="text-left p-2">#</th>
+                <th className="text-left p-2">Strategy</th>
+                <th className="text-center p-2">Category</th>
+                <th className="text-left p-2">Risk</th>
+                <th className="text-right p-2">Margin</th>
+                <th className="text-right p-2">Monthly P&L</th>
+                <th className="text-right p-2">APY</th>
+                <th className="text-right p-2 text-green-700">If +5%</th>
+                <th className="text-right p-2 text-red-700">If -5%</th>
+                <th className="text-center p-2">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {generateStrategies
+                .filter(s => !s.twilightPosition)
+                .map((strategy, idx) => (
+                <tr
+                  key={strategy.id}
+                  className={`border-b hover:bg-slate-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-blue-50' : ''}`}
+                  onClick={() => setSelectedStrategy(strategy)}
+                >
+                  <td className="p-2 text-slate-400">{idx + 1}</td>
+                  <td className="p-2">
+                    <div className="font-medium text-slate-800">{strategy.name}</div>
+                    <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
+                  </td>
+                  <td className="p-2 text-center">
+                    <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
+                      {strategy.category}
+                    </span>
+                  </td>
+                  <td className="p-2">
+                    <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
+                      {strategy.risk}
+                    </span>
+                  </td>
+                  <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
+                  <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
+                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
+                  </td>
+                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
+                  </td>
+                  <td className="p-2 text-center">
+                    <button
+                      className="px-2 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
                       onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
                     >
                       Details
@@ -1306,11 +2457,13 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                   )}
                 </div>
 
-                {/* Binance Position Card - LINEAR PERP (USDT-margined) */}
-                <div className={`rounded-xl p-4 ${selectedStrategy.binancePosition ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-400'}`}>
+                {/* Binance/Bybit Position Card */}
+                <div className={`rounded-xl p-4 ${selectedStrategy.binancePosition ? (selectedStrategy.isBybitStrategy ? 'bg-violet-600 text-white' : 'bg-purple-600 text-white') : 'bg-gray-100 text-gray-400'}`}>
                   <div className="flex justify-between items-center mb-1">
-                    <div className="text-sm opacity-80">BINANCE POSITION</div>
-                    <span className="bg-green-500 text-white text-xs px-2 py-0.5 rounded font-bold">LINEAR PERP</span>
+                    <div className="text-sm opacity-80">{selectedStrategy.isBybitStrategy ? 'BYBIT POSITION' : 'BINANCE POSITION'}</div>
+                    <span className={`text-white text-xs px-2 py-0.5 rounded font-bold ${selectedStrategy.isBybitStrategy ? 'bg-orange-500' : 'bg-green-500'}`}>
+                      {selectedStrategy.isBybitStrategy ? 'INVERSE PERP' : 'LINEAR PERP'}
+                    </span>
                   </div>
                   {selectedStrategy.binancePosition ? (
                     <>
@@ -1331,23 +2484,43 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                           <div className="opacity-70">Leverage</div>
                           <div className="text-xl font-bold">{selectedStrategy.binanceLeverage}x</div>
                         </div>
-                        <div className="bg-green-500/30 rounded-lg p-2 col-span-2">
-                          <div className="opacity-90 font-semibold">Margin Required (USDT)</div>
-                          <div className="text-2xl font-bold">{selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)} USDT</div>
+                        <div className={`rounded-lg p-2 col-span-2 ${selectedStrategy.isBybitStrategy ? 'bg-orange-500/30' : 'bg-green-500/30'}`}>
+                          <div className="opacity-90 font-semibold">Margin Required ({selectedStrategy.isBybitStrategy ? 'BTC' : 'USDT'})</div>
+                          {selectedStrategy.isBybitStrategy ? (
+                            <>
+                              <div className="text-2xl font-bold">{selectedStrategy.bybitMarginBTC?.toFixed(6) || (selectedStrategy.binanceSize / (selectedStrategy.binanceLeverage * (selectedStrategy.bybitPrice || cexPrice))).toFixed(6)} BTC</div>
+                              <div className="text-xs opacity-70">~${selectedStrategy.bybitMarginUSD?.toFixed(2) || (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)} USD</div>
+                            </>
+                          ) : (
+                            <div className="text-2xl font-bold">{selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2)} USDT</div>
+                          )}
                         </div>
                         <div className="bg-white/20 rounded-lg p-2 col-span-2">
                           <div className="opacity-70">Trading Fee</div>
-                          <div className="text-xl font-bold text-orange-300">${(selectedStrategy.binanceSize * BINANCE_TAKER_FEE * 2).toFixed(2)} (0.04% x2)</div>
+                          <div className="text-xl font-bold text-orange-300">
+                            ${(selectedStrategy.binanceSize * (selectedStrategy.isBybitStrategy ? 0.00055 : BINANCE_TAKER_FEE) * 2).toFixed(2)} ({selectedStrategy.isBybitStrategy ? '0.055%' : '0.04%'} x2)
+                          </div>
                         </div>
                       </div>
                       <div className="mt-3 text-xs bg-white/10 rounded p-2">
-                        <div className="font-semibold mb-1">How Linear Perp Works:</div>
-                        <div>You deposit USDT as margin. P&L is settled in USDT.</div>
-                        <div className="mt-1">Position: {(selectedStrategy.binanceSize / cexPrice).toFixed(6)} BTC worth at ${cexPrice.toLocaleString()}</div>
+                        {selectedStrategy.isBybitStrategy ? (
+                          <>
+                            <div className="font-semibold mb-1">How Bybit Inverse Perp Works:</div>
+                            <div>You deposit BTC as margin. P&L is settled in BTC. Same as Twilight!</div>
+                            <div className="mt-1">Position: {(selectedStrategy.binanceSize / (selectedStrategy.bybitPrice || bybitPrice)).toFixed(6)} BTC worth at ${(selectedStrategy.bybitPrice || bybitPrice).toLocaleString()}</div>
+                            <div className="mt-1 text-yellow-300">Funding: {(selectedStrategy.bybitFundingRate * 100).toFixed(4)}% per 8h</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="font-semibold mb-1">How Linear Perp Works:</div>
+                            <div>You deposit USDT as margin. P&L is settled in USDT.</div>
+                            <div className="mt-1">Position: {(selectedStrategy.binanceSize / cexPrice).toFixed(6)} BTC worth at ${cexPrice.toLocaleString()}</div>
+                          </>
+                        )}
                       </div>
                     </>
                   ) : (
-                    <div className="text-center py-4">No Binance Position</div>
+                    <div className="text-center py-4">No {selectedStrategy.isBybitStrategy ? 'Bybit' : 'Binance'} Position</div>
                   )}
                 </div>
               </div>
@@ -1363,9 +2536,12 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     </div>
                   </div>
                   <div className="text-center">
-                    <div className="text-slate-500">USDT Needed (Binance)</div>
-                    <div className="text-xl font-bold text-green-600">
-                      {selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binancePosition ? (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2) : '0')} USDT
+                    <div className="text-slate-500">{selectedStrategy.isBybitStrategy ? 'BTC Needed (Bybit)' : 'USDT Needed (Binance)'}</div>
+                    <div className={`text-xl font-bold ${selectedStrategy.isBybitStrategy ? 'text-violet-600' : 'text-green-600'}`}>
+                      {selectedStrategy.isBybitStrategy
+                        ? `${selectedStrategy.bybitMarginBTC?.toFixed(6) || (selectedStrategy.binancePosition ? (selectedStrategy.binanceSize / (selectedStrategy.binanceLeverage * (selectedStrategy.bybitPrice || bybitPrice))).toFixed(6) : '0')} BTC`
+                        : `${selectedStrategy.binanceMarginUSDT?.toFixed(2) || (selectedStrategy.binancePosition ? (selectedStrategy.binanceSize / selectedStrategy.binanceLeverage).toFixed(2) : '0')} USDT`
+                      }
                     </div>
                   </div>
                   <div className="text-center bg-slate-100 rounded-lg p-2">
