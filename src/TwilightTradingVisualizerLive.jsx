@@ -43,6 +43,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [twilightShortSize, setTwilightShortSize] = useState(0);
   // Twilight funding rate cap as % of Binance (0 = no cap). Step 1%, range 0–100.
   const [twilightFundingCapPct, setTwilightFundingCapPct] = useState(0);
+  // When true, Twilight funding rate is pegged to (cap% of Binance), ignoring pool imbalance.
+  const [pegTwilightToCapRate, setPegTwilightToCapRate] = useState(false);
 
   // Trading parameters
   const [tvl, setTvl] = useState(DEFAULT_TVL);
@@ -337,16 +339,18 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
   useEffect(() => {
     const raw = calculateTwilightFundingRate();
-    const capped = applyTwilightFundingCap(raw, binanceFundingRate, twilightFundingCapPct);
+    const rate = (pegTwilightToCapRate && twilightFundingCapPct > 0)
+      ? (twilightFundingCapPct / 100) * binanceFundingRate
+      : applyTwilightFundingCap(raw, binanceFundingRate, twilightFundingCapPct);
     setFundingHistory(prev => {
       const newHistory = [...prev, {
         time: new Date().toLocaleTimeString(),
         binance: binanceFundingRate * 100, // Convert to percentage
-        twilight: capped * 100
+        twilight: rate * 100
       }];
       return newHistory.length > maxHistoryLength ? newHistory.slice(-maxHistoryLength) : newHistory;
     });
-  }, [binanceFundingRate, twilightLongSize, twilightShortSize, twilightFundingCapPct]);
+  }, [binanceFundingRate, twilightLongSize, twilightShortSize, twilightFundingCapPct, pegTwilightToCapRate]);
 
   // ===================
   // CALCULATIONS
@@ -382,7 +386,9 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   }
 
   const rawTwilightFundingRate = calculateTwilightFundingRate();
-  const twilightFundingRate = applyTwilightFundingCap(rawTwilightFundingRate, binanceFundingRate, twilightFundingCapPct);
+  const twilightFundingRate = pegTwilightToCapRate && twilightFundingCapPct > 0
+    ? (twilightFundingCapPct / 100) * binanceFundingRate
+    : applyTwilightFundingCap(rawTwilightFundingRate, binanceFundingRate, twilightFundingCapPct);
 
   // Calculate trade impact on pool skew and funding rate
   const calculateTradeImpact = (tradeSizeUSD, direction) => {
@@ -403,9 +409,11 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     const skewChange = newSkew - currentSkew;
 
     const imbalance = (newLongs - newShorts) / totalSize;
-    const newFundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0 * TWILIGHT_FUNDING_SCALE);
-    const signedFundingRate = imbalance >= 0 ? newFundingRate : -newFundingRate;
-    const cappedFundingRate = applyTwilightFundingCap(signedFundingRate, binanceFundingRate, twilightFundingCapPct);
+    const newFundingRateRaw = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0 * TWILIGHT_FUNDING_SCALE);
+    const signedFundingRate = imbalance >= 0 ? newFundingRateRaw : -newFundingRateRaw;
+    const cappedFundingRate = pegTwilightToCapRate && twilightFundingCapPct > 0
+      ? (twilightFundingCapPct / 100) * binanceFundingRate
+      : applyTwilightFundingCap(signedFundingRate, binanceFundingRate, twilightFundingCapPct);
 
     // Annualized APY (per-8h rate × 3 payments/day × 365 days)
     const annualizedAPY = Math.abs(cappedFundingRate) * 3 * 365 * 100;
@@ -1703,7 +1711,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         <div className="bg-white rounded-lg p-3 shadow">
           <div className="text-xs text-slate-500">Binance Funding (8h)</div>
           <div className={`text-xl font-bold ${binanceFundingRate >= 0 ? 'text-orange-600' : 'text-blue-600'}`}>
-            {binanceFundingRate >= 0 ? '+' : ''}{(binanceFundingRate * 100).toFixed(4)}%
+            {binanceFundingRate >= 0 ? '+' : ''}{(binanceFundingRate * 100).toFixed(6)}%
           </div>
           <div className="text-xs text-slate-400">Next: {getTimeUntilFunding()}</div>
         </div>
@@ -1790,12 +1798,12 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               className="w-full px-2 py-1 border rounded text-sm"
             />
           </div>
-          <div className="min-w-[15rem] md:col-span-2">
-            <label className="block text-xs text-slate-600 mb-1 whitespace-nowrap">Twilight funding rate cap as a % of Bin</label>
+          <div className="min-w-[10rem] w-40">
+            <label className="block text-xs text-slate-600 mb-1 whitespace-nowrap">Cap Tw FR as % of Bin.</label>
             <select
               value={twilightFundingCapPct}
               onChange={(e) => setTwilightFundingCapPct(Number(e.target.value))}
-              className="w-full min-w-[4rem] px-2 py-1 border rounded text-sm bg-white"
+              className="w-full px-2 py-1 border rounded text-sm bg-white"
             >
               {Array.from({ length: 100 }, (_, i) => 99 - i).map((pct) => (
                 <option key={pct} value={pct}>{pct}%</option>
@@ -1803,11 +1811,23 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
             </select>
             <p className="text-xs text-slate-400 mt-0.5">0% = no cap</p>
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 mb-1">Twilight Funding Rate</label>
-            <div className={`px-2 py-1 rounded text-sm font-mono ${twilightFundingRate >= 0 ? 'bg-orange-50 text-orange-700' : 'bg-blue-50 text-blue-700'}`}>
-              {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%/8h
+          <div className="pl-0 -ml-1">
+            <label htmlFor="peg-to-cap-rate" className="block text-xs text-slate-600 mb-1 cursor-pointer">Peg to cap rate</label>
+            <div className="flex items-center min-h-[26px] py-0.5">
+              <input
+                type="checkbox"
+                id="peg-to-cap-rate"
+                checked={pegTwilightToCapRate}
+                onChange={(e) => setPegTwilightToCapRate(e.target.checked)}
+                className="rounded border-slate-300 cursor-pointer"
+              />
             </div>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-col items-center justify-center text-center">
+          <label className="block text-xs text-slate-600 mb-1">Twilight Funding Rate</label>
+          <div className={`px-3 py-1.5 rounded text-sm font-mono ${twilightFundingRate >= 0 ? 'bg-orange-50 text-orange-700' : 'bg-blue-50 text-blue-700'}`}>
+            {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%/8h
           </div>
         </div>
         {useManualMode && (
@@ -2596,7 +2616,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 </div>
                 <div className="bg-purple-50 rounded-lg p-3">
                   <div className="text-purple-600 font-semibold">Binance Funding</div>
-                  <div className="text-2xl font-bold text-purple-800">{(binanceFundingRate * 100).toFixed(4)}%/8h</div>
+                  <div className="text-2xl font-bold text-purple-800">{(binanceFundingRate * 100).toFixed(6)}%/8h</div>
                   <div className="text-xs text-purple-600 mt-1">
                     {binanceFundingRate > 0 ? 'Longs pay, Shorts receive' : 'Shorts pay, Longs receive'}
                   </div>
