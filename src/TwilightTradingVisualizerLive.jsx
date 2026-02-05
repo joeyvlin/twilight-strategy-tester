@@ -1823,11 +1823,14 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               />
             </div>
           </div>
-        </div>
-        <div className="mt-4 flex flex-col items-center justify-center text-center">
-          <label className="block text-xs text-slate-600 mb-1">Twilight Funding Rate</label>
-          <div className={`px-3 py-1.5 rounded text-sm font-mono ${twilightFundingRate >= 0 ? 'bg-orange-50 text-orange-700' : 'bg-blue-50 text-blue-700'}`}>
-            {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%/8h
+          <div className="bg-white rounded-lg p-3 shadow border-2 border-blue-200">
+            <div className="text-xs text-slate-500">Twilight Funding (8h)</div>
+            <div className={`text-xl font-bold ${twilightFundingRate >= 0 ? 'text-orange-600' : 'text-blue-600'}`}>
+              {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%
+            </div>
+            <div className="text-xs text-slate-400">
+              {twilightFundingRate > 0 ? 'Longs pay, Shorts receive' : twilightFundingRate < 0 ? 'Shorts pay, Longs receive' : 'Balanced'}
+            </div>
           </div>
         </div>
         {useManualMode && (
