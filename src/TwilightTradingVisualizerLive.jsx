@@ -2108,52 +2108,75 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               </tr>
             </thead>
             <tbody>
-              {generateStrategies
-                .filter(s => s.twilightPosition === 'LONG')
-                .map((strategy, idx) => (
-                <tr
-                  key={strategy.id}
-                  className={`border-b hover:bg-green-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-green-100' : ''}`}
-                  onClick={() => setSelectedStrategy(strategy)}
-                >
-                  <td className="p-2 text-slate-400">{idx + 1}</td>
-                  <td className="p-2">
-                    <div className="font-medium text-slate-800">{strategy.name}</div>
-                    <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
-                  </td>
-                  <td className="p-2 text-center">
-                    <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
-                      {strategy.category}
-                    </span>
-                  </td>
-                  <td className="p-2">
-                    <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
-                      {strategy.risk}
-                    </span>
-                  </td>
-                  <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
-                  <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
-                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
-                  </td>
-                  <td className="p-2 text-center">
-                    <button
-                      className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600"
-                      onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
-                    >
-                      Details
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {(() => {
+                const longStrategies = generateStrategies.filter(s => s.twilightPosition === 'LONG');
+                const binanceLong = longStrategies.filter(s => !s.isBybitStrategy);
+                const bybitLong = longStrategies.filter(s => s.isBybitStrategy);
+                const renderLongRow = (strategy, idx) => (
+                  <tr
+                    key={strategy.id}
+                    className={`border-b hover:bg-green-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-green-100' : ''}`}
+                    onClick={() => setSelectedStrategy(strategy)}
+                  >
+                    <td className="p-2 text-slate-400">{idx + 1}</td>
+                    <td className="p-2">
+                      <div className="font-medium text-slate-800">{strategy.name}</div>
+                      <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
+                    </td>
+                    <td className="p-2 text-center">
+                      <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
+                        {strategy.category}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
+                        {strategy.risk}
+                      </span>
+                    </td>
+                    <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
+                    <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
+                      {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
+                    </td>
+                    <td className="p-2 text-center">
+                      <button
+                        className="px-2 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600"
+                        onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
+                      >
+                        Details
+                      </button>
+                    </td>
+                  </tr>
+                );
+                return (
+                  <>
+                    {binanceLong.length > 0 && (
+                      <>
+                        <tr className="bg-green-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Binance strategies</td>
+                        </tr>
+                        {binanceLong.map((s, i) => renderLongRow(s, i))}
+                      </>
+                    )}
+                    {bybitLong.length > 0 && (
+                      <>
+                        <tr className="bg-violet-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
+                        </tr>
+                        {bybitLong.map((s, i) => renderLongRow(s, i))}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </tbody>
           </table>
         </div>
@@ -2195,52 +2218,75 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               </tr>
             </thead>
             <tbody>
-              {generateStrategies
-                .filter(s => s.twilightPosition === 'SHORT')
-                .map((strategy, idx) => (
-                <tr
-                  key={strategy.id}
-                  className={`border-b hover:bg-red-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-red-100' : ''}`}
-                  onClick={() => setSelectedStrategy(strategy)}
-                >
-                  <td className="p-2 text-slate-400">{idx + 1}</td>
-                  <td className="p-2">
-                    <div className="font-medium text-slate-800">{strategy.name}</div>
-                    <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
-                  </td>
-                  <td className="p-2 text-center">
-                    <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
-                      {strategy.category}
-                    </span>
-                  </td>
-                  <td className="p-2">
-                    <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
-                      {strategy.risk}
-                    </span>
-                  </td>
-                  <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
-                  <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
-                    {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
-                  </td>
-                  <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
-                  </td>
-                  <td className="p-2 text-center">
-                    <button
-                      className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
-                      onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
-                    >
-                      Details
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {(() => {
+                const shortStrategies = generateStrategies.filter(s => s.twilightPosition === 'SHORT');
+                const binanceShort = shortStrategies.filter(s => !s.isBybitStrategy);
+                const bybitShort = shortStrategies.filter(s => s.isBybitStrategy);
+                const renderShortRow = (strategy, idx) => (
+                  <tr
+                    key={strategy.id}
+                    className={`border-b hover:bg-red-50 cursor-pointer ${selectedStrategy?.id === strategy.id ? 'bg-red-100' : ''}`}
+                    onClick={() => setSelectedStrategy(strategy)}
+                  >
+                    <td className="p-2 text-slate-400">{idx + 1}</td>
+                    <td className="p-2">
+                      <div className="font-medium text-slate-800">{strategy.name}</div>
+                      <div className="text-xs text-slate-500 max-w-xs truncate">{strategy.description}</div>
+                    </td>
+                    <td className="p-2 text-center">
+                      <span className={`px-2 py-0.5 rounded text-xs ${getCategoryColor(strategy.category)}`}>
+                        {strategy.category}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      <span className={`px-2 py-0.5 rounded text-xs ${getRiskColor(strategy.risk)}`}>
+                        {strategy.risk}
+                      </span>
+                    </td>
+                    <td className="p-2 text-right font-mono">${strategy.totalMargin.toFixed(2)}</td>
+                    <td className={`p-2 text-right font-mono ${strategy.monthlyPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.monthlyPnL >= 0 ? '+' : ''}${strategy.monthlyPnL?.toFixed(2) || '0'}
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
+                      {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
+                    </td>
+                    <td className={`p-2 text-right font-mono font-bold ${strategy.pnlDown5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategy.pnlDown5 >= 0 ? '+' : ''}${strategy.pnlDown5?.toFixed(2) || '0'}
+                    </td>
+                    <td className="p-2 text-center">
+                      <button
+                        className="px-2 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600"
+                        onClick={(e) => { e.stopPropagation(); setSelectedStrategy(strategy); }}
+                      >
+                        Details
+                      </button>
+                    </td>
+                  </tr>
+                );
+                return (
+                  <>
+                    {binanceShort.length > 0 && (
+                      <>
+                        <tr className="bg-red-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Binance strategies</td>
+                        </tr>
+                        {binanceShort.map((s, i) => renderShortRow(s, i))}
+                      </>
+                    )}
+                    {bybitShort.length > 0 && (
+                      <>
+                        <tr className="bg-violet-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
+                        </tr>
+                        {bybitShort.map((s, i) => renderShortRow(s, i))}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </tbody>
           </table>
         </div>
