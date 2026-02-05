@@ -41,6 +41,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // Pool state (for Twilight funding rate calculation)
   const [twilightLongSize, setTwilightLongSize] = useState(0);
   const [twilightShortSize, setTwilightShortSize] = useState(0);
+  // Twilight funding rate cap as % of Binance (0 = no cap). Step 1%, range 0–100.
+  const [twilightFundingCapPct, setTwilightFundingCapPct] = useState(0);
 
   // Trading parameters
   const [tvl, setTvl] = useState(DEFAULT_TVL);
@@ -334,15 +336,17 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   }, [twilightPrice, cexPrice]);
 
   useEffect(() => {
+    const raw = calculateTwilightFundingRate();
+    const capped = applyTwilightFundingCap(raw, binanceFundingRate, twilightFundingCapPct);
     setFundingHistory(prev => {
       const newHistory = [...prev, {
         time: new Date().toLocaleTimeString(),
         binance: binanceFundingRate * 100, // Convert to percentage
-        twilight: calculateTwilightFundingRate() * 100
+        twilight: capped * 100
       }];
       return newHistory.length > maxHistoryLength ? newHistory.slice(-maxHistoryLength) : newHistory;
     });
-  }, [binanceFundingRate, twilightLongSize, twilightShortSize]);
+  }, [binanceFundingRate, twilightLongSize, twilightShortSize, twilightFundingCapPct]);
 
   // ===================
   // CALCULATIONS
@@ -368,7 +372,17 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     return imbalance >= 0 ? fundingRate : -fundingRate;
   }
 
-  const twilightFundingRate = calculateTwilightFundingRate();
+  // Apply cap: Twilight rate cannot exceed (capPct/100) of Binance rate. 0% = no cap.
+  // Binance positive: cap positive Twilight at cap% of Binance. Binance negative: floor negative Twilight at cap% of Binance (closer to zero).
+  function applyTwilightFundingCap(rawTwilight, binanceRate, capPct) {
+    if (capPct <= 0) return rawTwilight;
+    const capValue = (capPct / 100) * binanceRate;
+    if (binanceRate >= 0) return rawTwilight > capValue ? capValue : rawTwilight;
+    return rawTwilight < capValue ? capValue : rawTwilight;
+  }
+
+  const rawTwilightFundingRate = calculateTwilightFundingRate();
+  const twilightFundingRate = applyTwilightFundingCap(rawTwilightFundingRate, binanceFundingRate, twilightFundingCapPct);
 
   // Calculate trade impact on pool skew and funding rate
   const calculateTradeImpact = (tradeSizeUSD, direction) => {
@@ -391,9 +405,10 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     const imbalance = (newLongs - newShorts) / totalSize;
     const newFundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0 * TWILIGHT_FUNDING_SCALE);
     const signedFundingRate = imbalance >= 0 ? newFundingRate : -newFundingRate;
+    const cappedFundingRate = applyTwilightFundingCap(signedFundingRate, binanceFundingRate, twilightFundingCapPct);
 
     // Annualized APY (per-8h rate × 3 payments/day × 365 days)
-    const annualizedAPY = Math.abs(newFundingRate) * 3 * 365 * 100;
+    const annualizedAPY = Math.abs(cappedFundingRate) * 3 * 365 * 100;
 
     // Determine if you pay or earn
     const longsDominate = newSkew > 0.5;
@@ -409,7 +424,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       newLongs,
       newShorts,
       skewChange,
-      newFundingRate: signedFundingRate,
+      newFundingRate: cappedFundingRate,
       annualizedAPY,
       youPay,
       youEarn,
@@ -1747,7 +1762,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           <Settings className="w-5 h-5 text-slate-600" />
           <h3 className="font-bold text-slate-800">Test Parameters</h3>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
           <div>
             <label className="block text-xs text-slate-600 mb-1">TVL ($)</label>
             <input
@@ -1774,6 +1789,19 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               onChange={(e) => setTwilightShortSize(Number(e.target.value))}
               className="w-full px-2 py-1 border rounded text-sm"
             />
+          </div>
+          <div className="min-w-[15rem] md:col-span-2">
+            <label className="block text-xs text-slate-600 mb-1 whitespace-nowrap">Twilight funding rate cap as a % of Bin</label>
+            <select
+              value={twilightFundingCapPct}
+              onChange={(e) => setTwilightFundingCapPct(Number(e.target.value))}
+              className="w-full min-w-[4rem] px-2 py-1 border rounded text-sm bg-white"
+            >
+              {Array.from({ length: 100 }, (_, i) => 99 - i).map((pct) => (
+                <option key={pct} value={pct}>{pct}%</option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-400 mt-0.5">0% = no cap</p>
           </div>
           <div>
             <label className="block text-xs text-slate-600 mb-1">Twilight Funding Rate</label>
