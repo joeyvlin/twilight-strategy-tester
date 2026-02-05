@@ -1,15 +1,20 @@
-import { useState } from 'react'
-import TwilightTradingVisualizerLive from './TwilightTradingVisualizerLive'
-import CEXComparisonPage from './CEXComparisonPage'
+import { useState, lazy, Suspense } from 'react'
+
+const TwilightTradingVisualizerLive = lazy(() => import('./TwilightTradingVisualizerLive'))
+const CEXComparisonPage = lazy(() => import('./CEXComparisonPage'))
 
 function App() {
   const [currentPage, setCurrentPage] = useState('twilight')
 
-  if (currentPage === 'cex') {
-    return <CEXComparisonPage onNavigateToTwilight={() => setCurrentPage('twilight')} />
-  }
-
-  return <TwilightTradingVisualizerLive onNavigateToCEX={() => setCurrentPage('cex')} />
+  return (
+    <Suspense fallback={<div className="app-loading">Loading…</div>}>
+      {currentPage === 'cex' ? (
+        <CEXComparisonPage onNavigateToTwilight={() => setCurrentPage('twilight')} />
+      ) : (
+        <TwilightTradingVisualizerLive onNavigateToCEX={() => setCurrentPage('cex')} />
+      )}
+    </Suspense>
+  )
 }
 
 export default App

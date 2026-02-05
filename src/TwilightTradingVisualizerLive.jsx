@@ -52,16 +52,29 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [selectedStrategy, setSelectedStrategy] = useState(null);
   const [tradeSize, setTradeSize] = useState(100); // Trade size for impact calculator
 
-  // Price/funding history for charts
-  const [priceHistory, setPriceHistory] = useState([]);
+  // Funding rate comparison chart: when disabled, no history stored and chart not rendered
+  const [fundingChartEnabled, setFundingChartEnabled] = useState(true);
   const [fundingHistory, setFundingHistory] = useState([]);
-  const maxHistoryLength = 50;
+  const maxHistoryLength = 30; // Only keep what we display; discard older
+  const HISTORY_THROTTLE_MS = 3000; // Throttle appends to reduce churn
+  const lastFundingHistoryAppendRef = useRef(0);
+  const lastMarkPriceStateUpdateRef = useRef(0);
+  const MARK_PRICE_THROTTLE_MS = 3000; // Throttle mark price WebSocket state updates
 
   // WebSocket refs
   const spotWsRef = useRef(null);
   const futuresWsRef = useRef(null);
   const markPriceWsRef = useRef(null);
   const bybitWsRef = useRef(null);
+  // Reconnect timeout and cancelled refs for cleanup (prevent memory leaks)
+  const spotReconnectRef = useRef(null);
+  const spotCancelledRef = useRef(false);
+  const futuresReconnectRef = useRef(null);
+  const futuresCancelledRef = useRef(false);
+  const markPriceReconnectRef = useRef(null);
+  const markPriceCancelledRef = useRef(false);
+  const bybitReconnectRef = useRef(null);
+  const bybitCancelledRef = useRef(false);
 
   // ===================
   // WEBSOCKET CONNECTIONS
@@ -76,24 +89,26 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // Connect to Binance Spot WebSocket (for Twilight pricing)
   useEffect(() => {
     if (useManualMode) return;
+    spotCancelledRef.current = false;
 
     const connectSpotWebSocket = () => {
+      if (spotCancelledRef.current) return;
       try {
-        // Use aggTrade for slightly less frequent but still real-time updates
         const spotWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
 
         spotWs.onopen = () => {
+          if (spotCancelledRef.current) return;
           console.log('Connected to Binance Spot WebSocket');
           setIsSpotConnected(true);
         };
 
         spotWs.onmessage = (event) => {
+          if (spotCancelledRef.current) return;
           const now = Date.now();
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
           const roundedPrice = Math.round(price);
 
-          // Only update if price changed and throttle time passed
           if (roundedPrice !== lastSpotPriceRef.current &&
               now - lastUpdateTimeRef.current > UPDATE_THROTTLE_MS) {
             lastSpotPriceRef.current = roundedPrice;
@@ -103,43 +118,52 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           }
         };
 
-        spotWs.onerror = () => setIsSpotConnected(false);
+        spotWs.onerror = () => { if (!spotCancelledRef.current) setIsSpotConnected(false); };
         spotWs.onclose = () => {
+          if (spotCancelledRef.current) return;
           setIsSpotConnected(false);
-          setTimeout(connectSpotWebSocket, 3000);
+          spotReconnectRef.current = setTimeout(connectSpotWebSocket, 3000);
         };
 
         spotWsRef.current = spotWs;
       } catch (error) {
-        setIsSpotConnected(false);
+        if (!spotCancelledRef.current) setIsSpotConnected(false);
       }
     };
 
     connectSpotWebSocket();
-    return () => spotWsRef.current?.close();
+    return () => {
+      spotCancelledRef.current = true;
+      if (spotReconnectRef.current) clearTimeout(spotReconnectRef.current);
+      spotReconnectRef.current = null;
+      spotWsRef.current?.close();
+      spotWsRef.current = null;
+    };
   }, [useManualMode]);
 
   // Connect to Binance Futures WebSocket (for CEX pricing)
   useEffect(() => {
     if (useManualMode) return;
+    futuresCancelledRef.current = false;
 
     const connectFuturesWebSocket = () => {
+      if (futuresCancelledRef.current) return;
       try {
-        // Use aggTrade for slightly less frequent but still real-time updates
         const futuresWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');
 
         futuresWs.onopen = () => {
+          if (futuresCancelledRef.current) return;
           console.log('Connected to Binance Futures WebSocket');
           setIsFuturesConnected(true);
         };
 
         futuresWs.onmessage = (event) => {
+          if (futuresCancelledRef.current) return;
           const now = Date.now();
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
           const roundedPrice = Math.round(price);
 
-          // Only update if price changed
           if (roundedPrice !== lastFuturesPriceRef.current &&
               now - lastUpdateTimeRef.current > UPDATE_THROTTLE_MS) {
             lastFuturesPriceRef.current = roundedPrice;
@@ -148,42 +172,53 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           }
         };
 
-        futuresWs.onerror = () => setIsFuturesConnected(false);
+        futuresWs.onerror = () => { if (!futuresCancelledRef.current) setIsFuturesConnected(false); };
         futuresWs.onclose = () => {
+          if (futuresCancelledRef.current) return;
           setIsFuturesConnected(false);
-          setTimeout(connectFuturesWebSocket, 3000);
+          futuresReconnectRef.current = setTimeout(connectFuturesWebSocket, 3000);
         };
 
         futuresWsRef.current = futuresWs;
       } catch (error) {
-        setIsFuturesConnected(false);
+        if (!futuresCancelledRef.current) setIsFuturesConnected(false);
       }
     };
 
     connectFuturesWebSocket();
-    return () => futuresWsRef.current?.close();
+    return () => {
+      futuresCancelledRef.current = true;
+      if (futuresReconnectRef.current) clearTimeout(futuresReconnectRef.current);
+      futuresReconnectRef.current = null;
+      futuresWsRef.current?.close();
+      futuresWsRef.current = null;
+    };
   }, [useManualMode]);
 
   // Connect to Binance Mark Price WebSocket (for funding rate)
   useEffect(() => {
     if (useManualMode) return;
+    markPriceCancelledRef.current = false;
 
     const connectMarkPriceWebSocket = () => {
+      if (markPriceCancelledRef.current) return;
       try {
-        // Mark price stream includes funding rate - updates every 3s
         const markPriceWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@markPrice@1s');
 
         markPriceWs.onopen = () => {
+          if (markPriceCancelledRef.current) return;
           console.log('Connected to Binance Mark Price WebSocket');
           setIsMarkPriceConnected(true);
         };
 
         markPriceWs.onmessage = (event) => {
+          if (markPriceCancelledRef.current) return;
+          const now = Date.now();
+          const isFirstUpdate = lastMarkPriceStateUpdateRef.current === 0;
+          if (!isFirstUpdate && now - lastMarkPriceStateUpdateRef.current < MARK_PRICE_THROTTLE_MS) return;
+          lastMarkPriceStateUpdateRef.current = now;
+
           const data = JSON.parse(event.data);
-          // Mark price stream format:
-          // { "e": "markPriceUpdate", "E": timestamp, "s": "BTCUSDT",
-          //   "p": "mark price", "i": "index price", "P": "settlement price",
-          //   "r": "funding rate", "T": "next funding time" }
           const newMarkPrice = parseFloat(data.p);
           const newFundingRate = parseFloat(data.r);
           const newNextFundingTime = parseInt(data.T);
@@ -194,49 +229,51 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           setLastMarkPriceUpdate(new Date().toLocaleTimeString());
         };
 
-        markPriceWs.onerror = () => setIsMarkPriceConnected(false);
+        markPriceWs.onerror = () => { if (!markPriceCancelledRef.current) setIsMarkPriceConnected(false); };
         markPriceWs.onclose = () => {
+          if (markPriceCancelledRef.current) return;
           setIsMarkPriceConnected(false);
-          setTimeout(connectMarkPriceWebSocket, 3000);
+          markPriceReconnectRef.current = setTimeout(connectMarkPriceWebSocket, 3000);
         };
 
         markPriceWsRef.current = markPriceWs;
       } catch (error) {
-        setIsMarkPriceConnected(false);
+        if (!markPriceCancelledRef.current) setIsMarkPriceConnected(false);
       }
     };
 
     connectMarkPriceWebSocket();
-    return () => markPriceWsRef.current?.close();
+    return () => {
+      markPriceCancelledRef.current = true;
+      if (markPriceReconnectRef.current) clearTimeout(markPriceReconnectRef.current);
+      markPriceReconnectRef.current = null;
+      markPriceWsRef.current?.close();
+      markPriceWsRef.current = null;
+    };
   }, [useManualMode]);
 
   // Connect to Bybit Inverse BTCUSD WebSocket
-  // Endpoint: wss://stream.bybit.com/v5/public/inverse
   const lastBybitPriceRef = useRef(0);
+  const bybitPingIntervalRef = useRef(null);
   useEffect(() => {
     if (useManualMode) return;
-
-    let reconnectTimeout = null;
-    let pingInterval = null;
+    bybitCancelledRef.current = false;
 
     const connectBybitWebSocket = () => {
+      if (bybitCancelledRef.current) return;
       try {
-        // Bybit V5 public inverse WebSocket
         const bybitWs = new WebSocket('wss://stream.bybit.com/v5/public/inverse');
 
         bybitWs.onopen = () => {
+          if (bybitCancelledRef.current) return;
           console.log('Connected to Bybit Inverse WebSocket');
           setIsBybitConnected(true);
 
-          // Subscribe to BTCUSD ticker and tickers (for funding rate)
-          const subscribeMsg = {
-            op: 'subscribe',
-            args: ['tickers.BTCUSD']
-          };
+          const subscribeMsg = { op: 'subscribe', args: ['tickers.BTCUSD'] };
           bybitWs.send(JSON.stringify(subscribeMsg));
 
-          // Bybit requires ping every 20 seconds to keep connection alive
-          pingInterval = setInterval(() => {
+          bybitPingIntervalRef.current = setInterval(() => {
+            if (bybitCancelledRef.current) return;
             if (bybitWs.readyState === WebSocket.OPEN) {
               bybitWs.send(JSON.stringify({ op: 'ping' }));
             }
@@ -244,73 +281,59 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         };
 
         bybitWs.onmessage = (event) => {
+          if (bybitCancelledRef.current) return;
           try {
             const message = JSON.parse(event.data);
+            if (message.op === 'pong' || message.ret_msg === 'pong') return;
+            if (message.op === 'subscribe') return;
 
-            // Handle pong response
-            if (message.op === 'pong' || message.ret_msg === 'pong') {
-              return;
-            }
-
-            // Handle subscription confirmation
-            if (message.op === 'subscribe') {
-              console.log('Bybit subscription:', message.success ? 'success' : 'failed');
-              return;
-            }
-
-            // Handle ticker data
-            // Format: { topic: "tickers.BTCUSD", data: { symbol, lastPrice, fundingRate, nextFundingTime, ... } }
             if (message.topic && message.topic.startsWith('tickers.BTCUSD') && message.data) {
               const data = message.data;
               const price = parseFloat(data.lastPrice) || parseFloat(data.markPrice) || 0;
               const fundingRate = parseFloat(data.fundingRate) || 0;
               const nextFunding = parseInt(data.nextFundingTime) || null;
 
-              // Throttle updates
               const roundedPrice = Math.round(price);
               if (roundedPrice > 0 && roundedPrice !== lastBybitPriceRef.current) {
                 lastBybitPriceRef.current = roundedPrice;
                 setBybitPrice(roundedPrice);
                 setLastBybitUpdate(new Date().toLocaleTimeString());
               }
-
-              if (fundingRate !== 0) {
-                setBybitFundingRate(fundingRate);
-              }
-              if (nextFunding) {
-                setBybitNextFundingTime(nextFunding);
-              }
+              if (fundingRate !== 0) setBybitFundingRate(fundingRate);
+              if (nextFunding) setBybitNextFundingTime(nextFunding);
             }
           } catch (e) {
             console.log('Bybit WebSocket parse error:', e);
           }
         };
 
-        bybitWs.onerror = (error) => {
-          console.log('Bybit WebSocket error:', error);
-          setIsBybitConnected(false);
-        };
-
+        bybitWs.onerror = () => { if (!bybitCancelledRef.current) setIsBybitConnected(false); };
         bybitWs.onclose = () => {
+          if (bybitCancelledRef.current) return;
           console.log('Bybit WebSocket closed, reconnecting in 5s...');
           setIsBybitConnected(false);
-          if (pingInterval) clearInterval(pingInterval);
-          reconnectTimeout = setTimeout(connectBybitWebSocket, 5000);
+          if (bybitPingIntervalRef.current) clearInterval(bybitPingIntervalRef.current);
+          bybitPingIntervalRef.current = null;
+          bybitReconnectRef.current = setTimeout(connectBybitWebSocket, 5000);
         };
 
         bybitWsRef.current = bybitWs;
       } catch (error) {
-        console.log('Bybit WebSocket connection error:', error);
-        setIsBybitConnected(false);
-        reconnectTimeout = setTimeout(connectBybitWebSocket, 5000);
+        if (!bybitCancelledRef.current) {
+          setIsBybitConnected(false);
+          bybitReconnectRef.current = setTimeout(connectBybitWebSocket, 5000);
+        }
       }
     };
 
     connectBybitWebSocket();
 
     return () => {
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (pingInterval) clearInterval(pingInterval);
+      bybitCancelledRef.current = true;
+      if (bybitReconnectRef.current) clearTimeout(bybitReconnectRef.current);
+      bybitReconnectRef.current = null;
+      if (bybitPingIntervalRef.current) clearInterval(bybitPingIntervalRef.current);
+      bybitPingIntervalRef.current = null;
       if (bybitWsRef.current) {
         bybitWsRef.current.close();
         bybitWsRef.current = null;
@@ -319,38 +342,43 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   }, [useManualMode]);
 
   // ===================
-  // HISTORY TRACKING
+  // FUNDING HISTORY (chart only; not fetched - built from WebSocket state)
+  // When fundingChartEnabled is false: do not append; history is cleared on disable.
   // ===================
 
+  // Clear stored history when chart is disabled (release memory)
   useEffect(() => {
-    const spread = twilightPrice - cexPrice;
-    const spreadPercent = ((spread / cexPrice) * 100);
-
-    setPriceHistory(prev => {
-      const newHistory = [...prev, {
-        time: new Date().toLocaleTimeString(),
-        twilight: twilightPrice,
-        cex: cexPrice,
-        spread: parseFloat(spreadPercent.toFixed(3))
-      }];
-      return newHistory.length > maxHistoryLength ? newHistory.slice(-maxHistoryLength) : newHistory;
-    });
-  }, [twilightPrice, cexPrice]);
+    if (!fundingChartEnabled) setFundingHistory([]);
+  }, [fundingChartEnabled]);
 
   useEffect(() => {
+    if (!fundingChartEnabled) return; // Don't store data when chart is off
+    const now = Date.now();
+    if (now - lastFundingHistoryAppendRef.current < HISTORY_THROTTLE_MS) return;
+    lastFundingHistoryAppendRef.current = now;
+
     const raw = calculateTwilightFundingRate();
     const rate = (pegTwilightToCapRate && twilightFundingCapPct > 0)
       ? (twilightFundingCapPct / 100) * binanceFundingRate
       : applyTwilightFundingCap(raw, binanceFundingRate, twilightFundingCapPct);
+    const binancePct = binanceFundingRate * 100;
+    const twilightPct = rate * 100;
+
     setFundingHistory(prev => {
-      const newHistory = [...prev, {
+      // Skip duplicate: same values as last point (avoid redundant entries)
+      const last = prev.length > 0 ? prev[prev.length - 1] : null;
+      if (last && last.binance === binancePct && last.twilight === twilightPct) return prev;
+
+      const newEntry = {
         time: new Date().toLocaleTimeString(),
-        binance: binanceFundingRate * 100, // Convert to percentage
-        twilight: rate * 100
-      }];
+        binance: binancePct,
+        twilight: twilightPct
+      };
+      const newHistory = [...prev, newEntry];
+      // Discard older than displayed: keep only last maxHistoryLength
       return newHistory.length > maxHistoryLength ? newHistory.slice(-maxHistoryLength) : newHistory;
     });
-  }, [binanceFundingRate, twilightLongSize, twilightShortSize, twilightFundingCapPct, pegTwilightToCapRate]);
+  }, [fundingChartEnabled, binanceFundingRate, twilightLongSize, twilightShortSize, twilightFundingCapPct, pegTwilightToCapRate]);
 
   // ===================
   // CALCULATIONS
@@ -1576,6 +1604,23 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     return strategies.sort((a, b) => b.apy - a.apy);
   }, [twilightPrice, cexPrice, spread, binanceFundingRate, twilightFundingRate, tvl, currentSkew, currentTwilightAPY, bybitPrice, bybitFundingRate]);
 
+  // Memoize chart data so BarChart gets stable reference (avoids new array every render → less Recharts churn)
+  const strategyChartData = useMemo(
+    () => generateStrategies.slice(0, 10),
+    [generateStrategies]
+  );
+
+  // Sync selectedStrategy to current strategies so we don't retain previous strategy array in memory
+  useEffect(() => {
+    if (!selectedStrategy) return;
+    const current = generateStrategies.find((s) => s.id === selectedStrategy.id);
+    if (current && current !== selectedStrategy) {
+      setSelectedStrategy(current);
+    } else if (!current) {
+      setSelectedStrategy(null); // selected no longer in list (e.g. Bybit disconnected)
+    }
+  }, [generateStrategies, selectedStrategy?.id]);
+
   // ===================
   // RENDER HELPERS
   // ===================
@@ -2033,13 +2078,27 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         </div>
       )}
 
-      {/* Funding Rate Chart */}
-      {fundingHistory.length > 3 && (
-        <div className="bg-white rounded-lg p-4 shadow mb-6">
-          <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
+      {/* Funding Rate Chart — toggle off clears history and stops storing data (no extra socket; uses shared Mark Price stream) */}
+      <div className="bg-white rounded-lg p-4 shadow mb-6">
+        <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+          <h3 className="font-bold text-slate-800 flex items-center gap-2">
             <Activity className="w-5 h-5 text-blue-600" />
             Funding Rate Comparison (%/8h)
           </h3>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <span className="text-sm text-slate-600">Chart</span>
+            <input
+              type="checkbox"
+              checked={fundingChartEnabled}
+              onChange={(e) => setFundingChartEnabled(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+          </label>
+        </div>
+        {!fundingChartEnabled && (
+          <p className="text-sm text-slate-500">Disabled. No history stored; re-enable to show live comparison.</p>
+        )}
+        {fundingChartEnabled && fundingHistory.length > 3 && (
           <ResponsiveContainer width="100%" height={120}>
             <LineChart data={fundingHistory}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
@@ -2051,8 +2110,11 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
             </LineChart>
           </ResponsiveContainer>
-        </div>
-      )}
+        )}
+        {fundingChartEnabled && fundingHistory.length <= 3 && (
+          <p className="text-sm text-slate-500">Collecting data…</p>
+        )}
+      </div>
 
       {/* Strategy APY Chart */}
       <div className="bg-white rounded-lg p-4 shadow mb-6">
@@ -2061,14 +2123,14 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           Strategy APY Comparison
         </h3>
         <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={generateStrategies.slice(0, 10)} layout="vertical">
+          <BarChart data={strategyChartData} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
             <XAxis type="number" tickFormatter={(v) => `${v.toFixed(0)}%`} />
             <YAxis type="category" dataKey="name" width={200} tick={{ fontSize: 10 }} />
             <Tooltip formatter={(v) => `${v.toFixed(2)}%`} />
             <Bar dataKey="apy" name="APY">
-              {generateStrategies.slice(0, 10).map((entry, index) => (
-                <Cell key={`cell-${index}`} fill={entry.apy > 0 ? '#22c55e' : '#ef4444'} />
+              {strategyChartData.map((entry, index) => (
+                <Cell key={`cell-${entry.id ?? index}`} fill={entry.apy > 0 ? '#22c55e' : '#ef4444'} />
               ))}
             </Bar>
           </BarChart>

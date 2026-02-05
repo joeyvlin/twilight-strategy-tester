@@ -40,6 +40,12 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
   const spotWsRef = useRef(null);
   const futuresWsRef = useRef(null);
   const markPriceWsRef = useRef(null);
+  const spotReconnectRef = useRef(null);
+  const spotCancelledRef = useRef(false);
+  const futuresReconnectRef = useRef(null);
+  const futuresCancelledRef = useRef(false);
+  const markPriceReconnectRef = useRef(null);
+  const markPriceCancelledRef = useRef(false);
 
   // ===================
   // WEBSOCKET CONNECTIONS
@@ -47,83 +53,107 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
 
   useEffect(() => {
     if (useManualMode) return;
+    spotCancelledRef.current = false;
 
     const connectSpotWebSocket = () => {
+      if (spotCancelledRef.current) return;
       try {
         const spotWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
 
         spotWs.onopen = () => {
+          if (spotCancelledRef.current) return;
           setIsSpotConnected(true);
         };
 
         spotWs.onmessage = (event) => {
+          if (spotCancelledRef.current) return;
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
           setSpotPrice(Math.round(price));
           setLastSpotUpdate(new Date().toLocaleTimeString());
         };
 
-        spotWs.onerror = () => setIsSpotConnected(false);
+        spotWs.onerror = () => { if (!spotCancelledRef.current) setIsSpotConnected(false); };
         spotWs.onclose = () => {
+          if (spotCancelledRef.current) return;
           setIsSpotConnected(false);
-          setTimeout(connectSpotWebSocket, 3000);
+          spotReconnectRef.current = setTimeout(connectSpotWebSocket, 3000);
         };
 
         spotWsRef.current = spotWs;
       } catch (error) {
-        setIsSpotConnected(false);
+        if (!spotCancelledRef.current) setIsSpotConnected(false);
       }
     };
 
     connectSpotWebSocket();
-    return () => spotWsRef.current?.close();
+    return () => {
+      spotCancelledRef.current = true;
+      if (spotReconnectRef.current) clearTimeout(spotReconnectRef.current);
+      spotReconnectRef.current = null;
+      spotWsRef.current?.close();
+      spotWsRef.current = null;
+    };
   }, [useManualMode]);
 
   useEffect(() => {
     if (useManualMode) return;
+    futuresCancelledRef.current = false;
 
     const connectFuturesWebSocket = () => {
+      if (futuresCancelledRef.current) return;
       try {
         const futuresWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@trade');
 
         futuresWs.onopen = () => {
+          if (futuresCancelledRef.current) return;
           setIsFuturesConnected(true);
         };
 
         futuresWs.onmessage = (event) => {
+          if (futuresCancelledRef.current) return;
           const data = JSON.parse(event.data);
           const price = parseFloat(data.p);
           setFuturesPrice(Math.round(price));
           setLastFuturesUpdate(new Date().toLocaleTimeString());
         };
 
-        futuresWs.onerror = () => setIsFuturesConnected(false);
+        futuresWs.onerror = () => { if (!futuresCancelledRef.current) setIsFuturesConnected(false); };
         futuresWs.onclose = () => {
+          if (futuresCancelledRef.current) return;
           setIsFuturesConnected(false);
-          setTimeout(connectFuturesWebSocket, 3000);
+          futuresReconnectRef.current = setTimeout(connectFuturesWebSocket, 3000);
         };
 
         futuresWsRef.current = futuresWs;
       } catch (error) {
-        setIsFuturesConnected(false);
+        if (!futuresCancelledRef.current) setIsFuturesConnected(false);
       }
     };
 
     connectFuturesWebSocket();
-    return () => futuresWsRef.current?.close();
+    return () => {
+      futuresCancelledRef.current = true;
+      if (futuresReconnectRef.current) clearTimeout(futuresReconnectRef.current);
+      futuresReconnectRef.current = null;
+      futuresWsRef.current?.close();
+      futuresWsRef.current = null;
+    };
   }, [useManualMode]);
 
-  // Mark price for funding rate
   useEffect(() => {
     if (useManualMode) return;
+    markPriceCancelledRef.current = false;
 
     const connectMarkPriceWebSocket = () => {
+      if (markPriceCancelledRef.current) return;
       try {
         const markPriceWs = new WebSocket('wss://fstream.binance.com/ws/btcusdt@markPrice');
 
         markPriceWs.onopen = () => {};
 
         markPriceWs.onmessage = (event) => {
+          if (markPriceCancelledRef.current) return;
           const data = JSON.parse(event.data);
           const newFundingRate = parseFloat(data.r);
           const newNextFundingTime = parseInt(data.T);
@@ -133,7 +163,8 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
 
         markPriceWs.onerror = () => {};
         markPriceWs.onclose = () => {
-          setTimeout(connectMarkPriceWebSocket, 3000);
+          if (markPriceCancelledRef.current) return;
+          markPriceReconnectRef.current = setTimeout(connectMarkPriceWebSocket, 3000);
         };
 
         markPriceWsRef.current = markPriceWs;
@@ -141,7 +172,13 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
     };
 
     connectMarkPriceWebSocket();
-    return () => markPriceWsRef.current?.close();
+    return () => {
+      markPriceCancelledRef.current = true;
+      if (markPriceReconnectRef.current) clearTimeout(markPriceReconnectRef.current);
+      markPriceReconnectRef.current = null;
+      markPriceWsRef.current?.close();
+      markPriceWsRef.current = null;
+    };
   }, [useManualMode]);
 
   // ===================
@@ -577,6 +614,21 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
     return strategies.sort((a, b) => b.apy - a.apy);
   }, [spotPrice, futuresPrice, binanceFundingRate, tvl, btcInterestRate, usdtInterestRate]);
 
+  const strategyChartData = useMemo(
+    () => generateStrategies.slice(0, 10),
+    [generateStrategies]
+  );
+
+  useEffect(() => {
+    if (!selectedStrategy) return;
+    const current = generateStrategies.find((s) => s.id === selectedStrategy.id);
+    if (current && current !== selectedStrategy) {
+      setSelectedStrategy(current);
+    } else if (!current) {
+      setSelectedStrategy(null);
+    }
+  }, [generateStrategies, selectedStrategy?.id]);
+
   // ===================
   // RENDER HELPERS
   // ===================
@@ -763,14 +815,14 @@ const CEXComparisonPage = ({ onNavigateToTwilight }) => {
           Strategy APY Comparison (Flat Price)
         </h3>
         <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={generateStrategies.slice(0, 10)} layout="vertical">
+          <BarChart data={strategyChartData} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
             <XAxis type="number" tickFormatter={(v) => `${v.toFixed(0)}%`} />
             <YAxis type="category" dataKey="name" width={180} tick={{ fontSize: 10 }} />
             <Tooltip formatter={(v) => `${v.toFixed(2)}%`} />
             <Bar dataKey="apy" name="APY">
-              {generateStrategies.slice(0, 10).map((entry, index) => (
-                <Cell key={`cell-${index}`} fill={entry.apy > 0 ? '#22c55e' : '#ef4444'} />
+              {strategyChartData.map((entry, index) => (
+                <Cell key={`cell-${entry.id ?? index}`} fill={entry.apy > 0 ? '#22c55e' : '#ef4444'} />
               ))}
             </Bar>
           </BarChart>
