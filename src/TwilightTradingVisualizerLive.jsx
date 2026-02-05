@@ -11,6 +11,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const BINANCE_MAKER_FEE = 0.0002; // 0.02% maker fee
   const TWILIGHT_FEE = 0; // 0% fee on Twilight
   const TWILIGHT_FUNDING_PSI = 1.0; // Sensitivity parameter for Twilight funding
+  const TWILIGHT_FUNDING_SCALE = 100; // Scale factor so rate is in realistic % (formula was 100x too large)
 
   // ===================
   // STATE
@@ -354,14 +355,14 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const bybitSpread = bybitPrice > 0 ? twilightPrice - bybitPrice : 0;
   const bybitSpreadPercent = bybitPrice > 0 ? ((bybitSpread / bybitPrice) * 100).toFixed(4) : '0.0000';
 
-  // Calculate Twilight funding rate based on pool imbalance
-  // Formula: fundingrate = ((totallong - totalshort) / allpositionsize)² / (psi * 8.0)
+  // Calculate Twilight funding rate based on pool imbalance (per 8h, decimal)
+  // Formula: fundingrate = ((totallong - totalshort) / allpositionsize)² / (psi * 8.0 * TWILIGHT_FUNDING_SCALE). Applied 3x per day (every 8h).
   function calculateTwilightFundingRate() {
     const allPositionSize = twilightLongSize + twilightShortSize;
     if (allPositionSize === 0) return 0;
 
     const imbalance = (twilightLongSize - twilightShortSize) / allPositionSize;
-    const fundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0);
+    const fundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0 * TWILIGHT_FUNDING_SCALE);
 
     // Sign: positive = longs pay, negative = shorts pay
     return imbalance >= 0 ? fundingRate : -fundingRate;
@@ -388,11 +389,11 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     const skewChange = newSkew - currentSkew;
 
     const imbalance = (newLongs - newShorts) / totalSize;
-    const newFundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0);
+    const newFundingRate = Math.pow(imbalance, 2) / (TWILIGHT_FUNDING_PSI * 8.0 * TWILIGHT_FUNDING_SCALE);
     const signedFundingRate = imbalance >= 0 ? newFundingRate : -newFundingRate;
 
-    // Annualized APY (hourly funding × 24 hours × 365 days)
-    const annualizedAPY = Math.abs(newFundingRate) * 24 * 365 * 100;
+    // Annualized APY (per-8h rate × 3 payments/day × 365 days)
+    const annualizedAPY = Math.abs(newFundingRate) * 3 * 365 * 100;
 
     // Determine if you pay or earn
     const longsDominate = newSkew > 0.5;
@@ -421,7 +422,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const currentSkew = (twilightLongSize + twilightShortSize) > 0
     ? twilightLongSize / (twilightLongSize + twilightShortSize)
     : 0.5;
-  const currentTwilightAPY = Math.abs(twilightFundingRate) * 24 * 365 * 100;
+  const currentTwilightAPY = Math.abs(twilightFundingRate) * 3 * 365 * 100;
 
   // Time until next Binance funding
   const getTimeUntilFunding = () => {
@@ -581,9 +582,9 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       const binanceFundingPerDayUSDT = binanceSize * binanceFundingRate * 3;
 
       // TWILIGHT (Inverse): Funding paid/received in BTC
-      // Payment = Position Size × Funding Rate / BTC Price (24x per day for hourly)
+      // Payment = Position Size × Funding Rate / BTC Price (3x per day, every 8h)
       // Then convert to USD for comparison
-      const twilightFundingPerDayBTC = (twilightSize * Math.abs(twilightFundingRate) * 24) / btcPrice;
+      const twilightFundingPerDayBTC = (twilightSize * Math.abs(twilightFundingRate) * 3) / btcPrice;
       const twilightFundingPerDayUSD = twilightFundingPerDayBTC * btcPrice;
 
       // Determine funding direction
@@ -1480,17 +1481,17 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       });
 
       // Strategy 10: Funding Differential Capture
-      // Pure funding arbitrage - earn from both platforms when funding aligns
-      const twilightHourlyFunding = currentTwilightAPY / (365 * 24) * 100;
-      const bybitHourlyFunding = bybitAnnualizedFunding / (365 * 24);
-      const fundingDiff = Math.abs(twilightHourlyFunding - bybitHourlyFunding);
+      // Pure funding arbitrage - earn from both platforms when funding aligns (both per 8h)
+      const twilightPer8hPct = twilightFundingRate * 100;
+      const bybitPer8hPct = bybitFundingRate * 100;
+      const fundingDiff = Math.abs(twilightPer8hPct - bybitPer8hPct);
       const isFundingDiffLarge = fundingDiff > 0.001;
       const strat10 = calculateBybitStrategy('SHORT', 250, 10, 'LONG', 250, 10);
 
       strategies.push({
         id: id++,
         name: `Funding Diff Capture ${isFundingDiffLarge ? '💰' : ''}`,
-        description: `Capture funding rate differential. Twilight: ${twilightHourlyFunding.toFixed(4)}%/hr. Bybit: ${bybitHourlyFunding.toFixed(4)}%/hr. Diff: ${fundingDiff.toFixed(4)}%/hr.`,
+        description: `Capture funding rate differential. Twilight: ${twilightPer8hPct.toFixed(4)}%/8h. Bybit: ${bybitPer8hPct.toFixed(4)}%/8h. Diff: ${fundingDiff.toFixed(4)}%/8h.`,
         category: 'Bybit Inverse',
         twilightPosition: 'SHORT',
         twilightSize: 250,
@@ -1777,7 +1778,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           <div>
             <label className="block text-xs text-slate-600 mb-1">Twilight Funding Rate</label>
             <div className={`px-2 py-1 rounded text-sm font-mono ${twilightFundingRate >= 0 ? 'bg-orange-50 text-orange-700' : 'bg-blue-50 text-blue-700'}`}>
-              {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%/hr
+              {twilightFundingRate >= 0 ? '+' : ''}{(twilightFundingRate * 100).toFixed(6)}%/8h
             </div>
           </div>
         </div>
@@ -1907,7 +1908,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-600">New Funding Rate:</span>
-                  <span className="font-mono">{(longImpact.newFundingRate * 100).toFixed(4)}%/hr</span>
+                  <span className="font-mono">{(longImpact.newFundingRate * 100).toFixed(4)}%/8h</span>
                 </div>
                 <div className={`rounded-lg p-3 mt-3 ${longImpact.youPay ? 'bg-red-100' : 'bg-green-100'}`}>
                   <div className={`text-xs ${longImpact.youPay ? 'text-red-600' : 'text-green-600'}`}>
@@ -1948,7 +1949,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-600">New Funding Rate:</span>
-                  <span className="font-mono">{(shortImpact.newFundingRate * 100).toFixed(4)}%/hr</span>
+                  <span className="font-mono">{(shortImpact.newFundingRate * 100).toFixed(4)}%/8h</span>
                 </div>
                 <div className={`rounded-lg p-3 mt-3 ${shortImpact.youEarn ? 'bg-green-100' : 'bg-red-100'}`}>
                   <div className={`text-xs ${shortImpact.youEarn ? 'text-green-600' : 'text-red-600'}`}>
@@ -1986,16 +1987,16 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         <div className="bg-white rounded-lg p-4 shadow mb-6">
           <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
             <Activity className="w-5 h-5 text-blue-600" />
-            Funding Rate Comparison
+            Funding Rate Comparison (%/8h)
           </h3>
           <ResponsiveContainer width="100%" height={120}>
             <LineChart data={fundingHistory}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="time" tick={{ fontSize: 10 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${v.toFixed(3)}%`} />
-              <Tooltip formatter={(v) => `${v.toFixed(4)}%`} />
-              <Line type="monotone" dataKey="binance" stroke="#f97316" strokeWidth={2} dot={false} name="Binance" />
-              <Line type="monotone" dataKey="twilight" stroke="#3b82f6" strokeWidth={2} dot={false} name="Twilight" />
+              <Tooltip formatter={(v) => `${v.toFixed(4)}%/8h`} />
+              <Line type="monotone" dataKey="binance" stroke="#f97316" strokeWidth={2} dot={false} name="Binance %/8h" />
+              <Line type="monotone" dataKey="twilight" stroke="#3b82f6" strokeWidth={2} dot={false} name="Twilight %/8h" />
               <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
             </LineChart>
           </ResponsiveContainer>
@@ -2560,7 +2561,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div className="bg-blue-50 rounded-lg p-3">
                   <div className="text-blue-600 font-semibold">Twilight Funding</div>
-                  <div className="text-2xl font-bold text-blue-800">{(twilightFundingRate * 100).toFixed(4)}%/hr</div>
+                  <div className="text-2xl font-bold text-blue-800">{(twilightFundingRate * 100).toFixed(4)}%/8h</div>
                   <div className="text-xs text-blue-600 mt-1">
                     {twilightFundingRate > 0 ? 'Longs pay, Shorts receive' : twilightFundingRate < 0 ? 'Shorts pay, Longs receive' : 'Balanced (no payments)'}
                   </div>
