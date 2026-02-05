@@ -2110,7 +2110,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
             <tbody>
               {(() => {
                 const longStrategies = generateStrategies.filter(s => s.twilightPosition === 'LONG');
-                const binanceLong = longStrategies.filter(s => !s.isBybitStrategy);
+                const twilightOnlyLong = longStrategies.filter(s => !s.isBybitStrategy && !s.binancePosition);
+                const binanceLong = longStrategies.filter(s => !s.isBybitStrategy && s.binancePosition);
                 const bybitLong = longStrategies.filter(s => s.isBybitStrategy);
                 const renderLongRow = (strategy, idx) => (
                   <tr
@@ -2158,6 +2159,14 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 );
                 return (
                   <>
+                    {twilightOnlyLong.length > 0 && (
+                      <>
+                        <tr className="bg-slate-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Twilight only</td>
+                        </tr>
+                        {twilightOnlyLong.map((s, i) => renderLongRow(s, i))}
+                      </>
+                    )}
                     {binanceLong.length > 0 && (
                       <>
                         <tr className="bg-green-200/80">
@@ -2220,7 +2229,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
             <tbody>
               {(() => {
                 const shortStrategies = generateStrategies.filter(s => s.twilightPosition === 'SHORT');
-                const binanceShort = shortStrategies.filter(s => !s.isBybitStrategy);
+                const twilightOnlyShort = shortStrategies.filter(s => !s.isBybitStrategy && !s.binancePosition);
+                const binanceShort = shortStrategies.filter(s => !s.isBybitStrategy && s.binancePosition);
                 const bybitShort = shortStrategies.filter(s => s.isBybitStrategy);
                 const renderShortRow = (strategy, idx) => (
                   <tr
@@ -2268,6 +2278,14 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 );
                 return (
                   <>
+                    {twilightOnlyShort.length > 0 && (
+                      <>
+                        <tr className="bg-slate-200/80">
+                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Twilight only</td>
+                        </tr>
+                        {twilightOnlyShort.map((s, i) => renderShortRow(s, i))}
+                      </>
+                    )}
                     {binanceShort.length > 0 && (
                       <>
                         <tr className="bg-red-200/80">
