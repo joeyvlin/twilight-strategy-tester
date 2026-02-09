@@ -817,6 +817,42 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       const apyUp5 = ((pnlUp5 / totalMarginUSD) * 100) * 12;
       const apyDown5 = ((pnlDown5 / totalMarginUSD) * 100) * 12;
 
+      // Calculate target Twilight funding rate (% of Binance) for breakeven
+      // Only for HEDGED strategies (both Twilight AND Binance/Bybit positions)
+      let targetTwilightRatePct = null;
+      if (twilightSize > 0 && binanceSize > 0 && Math.abs(binanceFundingRate) > 0.000001) {
+        // Daily fees to cover
+        const dailyFeeCost = totalFees / 30;
+
+        // What Binance/Bybit contributes daily (negative if paying, positive if receiving)
+        let binanceDailyNet = 0;
+        if (binancePosition === 'SHORT' && binanceFundingRate > 0) {
+          binanceDailyNet = binanceSize * binanceFundingRate * 3; // Shorts receive
+        } else if (binancePosition === 'LONG' && binanceFundingRate < 0) {
+          binanceDailyNet = binanceSize * Math.abs(binanceFundingRate) * 3; // Longs receive
+        } else if (binancePosition === 'LONG' && binanceFundingRate > 0) {
+          binanceDailyNet = -binanceSize * binanceFundingRate * 3; // Longs pay
+        } else if (binancePosition === 'SHORT' && binanceFundingRate < 0) {
+          binanceDailyNet = -binanceSize * Math.abs(binanceFundingRate) * 3; // Shorts pay
+        }
+
+        // Required Twilight daily funding = fees - binance contribution
+        // For SHORT Twilight to be profitable: need to earn more than fees + binance losses
+        const requiredTwilightDaily = dailyFeeCost - binanceDailyNet;
+
+        if (requiredTwilightDaily > 0) {
+          // Need positive Twilight funding to cover costs
+          const targetRate = requiredTwilightDaily / (twilightSize * 3);
+          const pct = (targetRate / Math.abs(binanceFundingRate)) * 100;
+          if (isFinite(pct) && pct >= 0) {
+            targetTwilightRatePct = pct;
+          }
+        } else {
+          // Already profitable - Binance contribution covers fees
+          targetTwilightRatePct = 0;
+        }
+      }
+
       return {
         apy: isNaN(apy) ? 0 : apy,
         dailyPnL: isNaN(dailyPnL) ? 0 : dailyPnL,
@@ -858,7 +894,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         marginChangeDown10,
         apyUp5: isNaN(apyUp5) ? 0 : apyUp5,
         apyDown5: isNaN(apyDown5) ? 0 : apyDown5,
-        breakEvenPriceMove: breakEvenPriceMove * 100 // Convert to percentage
+        breakEvenPriceMove: breakEvenPriceMove * 100, // Convert to percentage
+        targetTwilightRatePct // Target Twilight rate as % of Binance for profitability
       };
     };
 
@@ -2167,6 +2204,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 <th className="text-right p-2">Margin</th>
                 <th className="text-right p-2">Monthly P&L</th>
                 <th className="text-right p-2">APY</th>
+                <th className="text-right p-2 text-violet-600">Target</th>
                 <th className="text-right p-2 text-green-700">If +5%</th>
                 <th className="text-right p-2 text-red-700">If -5%</th>
                 <th className="text-center p-2">Action</th>
@@ -2206,6 +2244,9 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
                       {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
                     </td>
+                    <td className="p-2 text-right font-mono text-xs text-violet-600">
+                      {strategy.targetTwilightRatePct != null ? `${strategy.targetTwilightRatePct.toFixed(0)}%` : '—'}
+                    </td>
                     <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                       {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
                     </td>
@@ -2227,7 +2268,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {twilightOnlyLong.length > 0 && (
                       <>
                         <tr className="bg-slate-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Twilight only</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Twilight only</td>
                         </tr>
                         {twilightOnlyLong.map((s, i) => renderLongRow(s, i))}
                       </>
@@ -2235,7 +2276,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {binanceLong.length > 0 && (
                       <>
                         <tr className="bg-green-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Binance strategies</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Binance strategies</td>
                         </tr>
                         {binanceLong.map((s, i) => renderLongRow(s, i))}
                       </>
@@ -2243,7 +2284,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {bybitLong.length > 0 && (
                       <>
                         <tr className="bg-violet-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
                         </tr>
                         {bybitLong.map((s, i) => renderLongRow(s, i))}
                       </>
@@ -2286,6 +2327,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                 <th className="text-right p-2">Margin</th>
                 <th className="text-right p-2">Monthly P&L</th>
                 <th className="text-right p-2">APY</th>
+                <th className="text-right p-2 text-violet-600">Target</th>
                 <th className="text-right p-2 text-green-700">If +5%</th>
                 <th className="text-right p-2 text-red-700">If -5%</th>
                 <th className="text-center p-2">Action</th>
@@ -2325,6 +2367,9 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     <td className={`p-2 text-right font-mono font-bold ${getAPYColor(strategy.apy)}`}>
                       {strategy.apy >= 0 ? '+' : ''}{strategy.apy?.toFixed(1) || '0'}%
                     </td>
+                    <td className="p-2 text-right font-mono text-xs text-violet-600">
+                      {strategy.targetTwilightRatePct != null ? `${strategy.targetTwilightRatePct.toFixed(0)}%` : '—'}
+                    </td>
                     <td className={`p-2 text-right font-mono font-bold ${strategy.pnlUp5 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                       {strategy.pnlUp5 >= 0 ? '+' : ''}${strategy.pnlUp5?.toFixed(2) || '0'}
                     </td>
@@ -2346,7 +2391,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {twilightOnlyShort.length > 0 && (
                       <>
                         <tr className="bg-slate-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Twilight only</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Twilight only</td>
                         </tr>
                         {twilightOnlyShort.map((s, i) => renderShortRow(s, i))}
                       </>
@@ -2354,7 +2399,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {binanceShort.length > 0 && (
                       <>
                         <tr className="bg-red-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Binance strategies</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Binance strategies</td>
                         </tr>
                         {binanceShort.map((s, i) => renderShortRow(s, i))}
                       </>
@@ -2362,7 +2407,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                     {bybitShort.length > 0 && (
                       <>
                         <tr className="bg-violet-200/80">
-                          <td colSpan={10} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
+                          <td colSpan={11} className="p-2 font-semibold text-slate-800">Bybit strategies</td>
                         </tr>
                         {bybitShort.map((s, i) => renderShortRow(s, i))}
                       </>
