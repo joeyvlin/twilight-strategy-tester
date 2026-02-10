@@ -6,9 +6,10 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // ===================
   // CONFIGURATION
   // ===================
-  const DEFAULT_TVL = 300; // $300 TVL for testing
+  const DEFAULT_TVL = 30000000; // $30M TVL for testing
   const BINANCE_TAKER_FEE = 0.0004; // 0.04% taker fee
   const BINANCE_MAKER_FEE = 0.0002; // 0.02% maker fee
+  const BYBIT_TAKER_FEE = 0.00055; // 0.055% taker fee
   const TWILIGHT_FEE = 0; // 0% fee on Twilight
   const TWILIGHT_FUNDING_PSI = 1.0; // Sensitivity parameter for Twilight funding
   const TWILIGHT_FUNDING_SCALE = 100; // Scale factor so rate is in realistic % (formula was 100x too large)
@@ -1859,6 +1860,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               type="number"
               value={tvl}
               onChange={(e) => setTvl(Number(e.target.value))}
+              min={0}
+              step={100000}
               className="w-full px-2 py-1 border rounded text-sm"
             />
           </div>
@@ -1868,6 +1871,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               type="number"
               value={twilightLongSize}
               onChange={(e) => setTwilightLongSize(Number(e.target.value))}
+              min={0}
+              step={100000}
               className="w-full px-2 py-1 border rounded text-sm"
             />
           </div>
@@ -1877,6 +1882,8 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               type="number"
               value={twilightShortSize}
               onChange={(e) => setTwilightShortSize(Number(e.target.value))}
+              min={0}
+              step={100000}
               className="w-full px-2 py-1 border rounded text-sm"
             />
           </div>
@@ -1996,6 +2003,108 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
             <div className="text-xl font-bold text-orange-700">${twilightLongSize.toLocaleString()}</div>
           </div>
         </div>
+      </div>
+
+      {/* Cost to Balance Pool */}
+      <div className="bg-white rounded-lg p-4 shadow mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <DollarSign className="w-5 h-5 text-slate-600" />
+          <h3 className="font-bold text-slate-800">Cost to Balance Pool</h3>
+        </div>
+        <p className="text-sm text-slate-600 mb-4">
+          To make long and short pool sizes equal, the admin would take a position on Twilight and hedge it on a CEX. Below: position to take, hedge side on each CEX, and funding P&amp;L over time (positive = profit, negative = cost).
+        </p>
+        {(() => {
+          const balancePositionSize = Math.abs(twilightLongSize - twilightShortSize);
+          const balanceDirection = twilightLongSize >= twilightShortSize ? 'SHORT' : 'LONG';
+          const hedgeSideBinance = balanceDirection === 'SHORT' ? 'LONG' : 'SHORT';
+          const hedgeSideBybit = balanceDirection === 'SHORT' ? 'LONG' : 'SHORT';
+          const periodsPerDay = 3;
+          const netFundingPer8hBinance = balanceDirection === 'SHORT'
+            ? balancePositionSize * (twilightFundingRate - binanceFundingRate)
+            : balancePositionSize * (binanceFundingRate - twilightFundingRate);
+          const netFundingPer8hBybit = balanceDirection === 'SHORT'
+            ? balancePositionSize * (twilightFundingRate - bybitFundingRate)
+            : balancePositionSize * (bybitFundingRate - twilightFundingRate);
+          const funding1dBinance = netFundingPer8hBinance * periodsPerDay * 1;
+          const funding7dBinance = netFundingPer8hBinance * periodsPerDay * 7;
+          const funding30dBinance = netFundingPer8hBinance * periodsPerDay * 30;
+          const funding1yBinance = netFundingPer8hBinance * periodsPerDay * 365;
+          const funding1dBybit = netFundingPer8hBybit * periodsPerDay * 1;
+          const funding7dBybit = netFundingPer8hBybit * periodsPerDay * 7;
+          const funding30dBybit = netFundingPer8hBybit * periodsPerDay * 30;
+          const funding1yBybit = netFundingPer8hBybit * periodsPerDay * 365;
+          const binanceTxFee = 2 * balancePositionSize * BINANCE_TAKER_FEE;
+          const bybitTxFee = 2 * balancePositionSize * BYBIT_TAKER_FEE;
+          const fmt = (v) => (v >= 0 ? `+$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+          if (balancePositionSize === 0) {
+            return (
+              <p className="text-slate-500 italic">Pool is already balanced (long size = short size). No position needed.</p>
+            );
+          }
+          return (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <div className="bg-slate-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-500">Position on Twilight</div>
+                  <div className="font-bold text-slate-800">{balanceDirection} ${balancePositionSize.toLocaleString()}</div>
+                </div>
+                <div className="bg-orange-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-500">Hedge on Binance</div>
+                  <div className="font-bold text-orange-700">{hedgeSideBinance} ${balancePositionSize.toLocaleString()}</div>
+                </div>
+                <div className="bg-purple-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-500">Hedge on Bybit</div>
+                  <div className="font-bold text-purple-700">{hedgeSideBybit} ${balancePositionSize.toLocaleString()}</div>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+                  <thead>
+                    <tr className="bg-slate-100">
+                      <th className="text-left py-2 px-3 border-b border-slate-200">Hedging cost (funding P&amp;L)</th>
+                      <th className="text-right py-2 px-3 border-b border-slate-200">1 day</th>
+                      <th className="text-right py-2 px-3 border-b border-slate-200">7 days</th>
+                      <th className="text-right py-2 px-3 border-b border-slate-200">30 days</th>
+                      <th className="text-right py-2 px-3 border-b border-slate-200">1 year</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="bg-white">
+                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (before tx fees)</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBinance)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBinance)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBinance)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBinance)}</td>
+                    </tr>
+                    <tr className="bg-orange-50/30">
+                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (incl. perpetual tx fees)</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding7dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding30dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1yBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBinance - binanceTxFee)}</td>
+                    </tr>
+                    <tr className="bg-white">
+                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Bybit (before tx fees)</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBybit)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBybit)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBybit)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBybit)}</td>
+                    </tr>
+                    <tr className="bg-purple-50/30">
+                      <td className="py-2 px-3 text-slate-600">Bybit (incl. perpetual tx fees)</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding1dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding7dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding30dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding1yBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBybit - bybitTxFee)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-slate-400 mt-2">Perpetual tx fees: Binance 0.04% × 2 (open+close), Bybit 0.055% × 2.</p>
+            </>
+          );
+        })()}
       </div>
 
       {/* Trade Impact Calculator */}
