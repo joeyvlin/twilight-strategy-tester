@@ -2036,6 +2036,25 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           const funding1yBybit = netFundingPer8hBybit * periodsPerDay * 365;
           const binanceTxFee = 2 * balancePositionSize * BINANCE_TAKER_FEE;
           const bybitTxFee = 2 * balancePositionSize * BYBIT_TAKER_FEE;
+          const binanceAfter1d = funding1dBinance - binanceTxFee;
+          const binanceAfter7d = funding7dBinance - binanceTxFee;
+          const binanceAfter30d = funding30dBinance - binanceTxFee;
+          const binanceAfter1y = funding1yBinance - binanceTxFee;
+          const bybitAfter1d = funding1dBybit - bybitTxFee;
+          const bybitAfter7d = funding7dBybit - bybitTxFee;
+          const bybitAfter30d = funding30dBybit - bybitTxFee;
+          const bybitAfter1y = funding1yBybit - bybitTxFee;
+          // Best for 1 day = row with highest 1-day PnL (compare all 4 rows)
+          const max1d = Math.max(funding1dBinance, binanceAfter1d, funding1dBybit, bybitAfter1d);
+          const isBest1dBinanceBefore = funding1dBinance >= max1d;
+          const isBest1dBinanceAfter = binanceAfter1d >= max1d;
+          const isBest1dBybitBefore = funding1dBybit >= max1d;
+          const isBest1dBybitAfter = bybitAfter1d >= max1d;
+          const best7d = binanceAfter7d >= bybitAfter7d ? 'binance' : 'bybit';
+          const best30d = binanceAfter30d >= bybitAfter30d ? 'binance' : 'bybit';
+          const best1y = binanceAfter1y >= bybitAfter1y ? 'binance' : 'bybit';
+          const bestHighlight = 'ring-2 ring-green-500 bg-green-100 font-semibold';
+          const bestHighlight1d = 'ring-2 ring-amber-500 bg-amber-100 font-semibold';
           const fmt = (v) => (v >= 0 ? `+$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
           if (balancePositionSize === 0) {
             return (
@@ -2072,36 +2091,36 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
                   <tbody>
                     <tr className="bg-white">
                       <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (before tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBinance)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBinance >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBinanceBefore ? bestHighlight1d : ''}`}>{fmt(funding1dBinance)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBinance)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBinance)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBinance)}</td>
                     </tr>
                     <tr className="bg-orange-50/30">
                       <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (incl. perpetual tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding7dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding30dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1yBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBinanceAfter ? bestHighlight1d : ''}`}>{fmt(funding1dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding7dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best7d === 'binance' ? bestHighlight : ''}`}>{fmt(funding7dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding30dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best30d === 'binance' ? bestHighlight : ''}`}>{fmt(funding30dBinance - binanceTxFee)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1yBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best1y === 'binance' ? bestHighlight : ''}`}>{fmt(funding1yBinance - binanceTxFee)}</td>
                     </tr>
                     <tr className="bg-white">
                       <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Bybit (before tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBybit)}</td>
+                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBybit >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBybitBefore ? bestHighlight1d : ''}`}>{fmt(funding1dBybit)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBybit)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBybit)}</td>
                       <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBybit)}</td>
                     </tr>
                     <tr className="bg-purple-50/30">
                       <td className="py-2 px-3 text-slate-600">Bybit (incl. perpetual tx fees)</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding1dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding7dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding30dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding1yBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding1dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBybitAfter ? bestHighlight1d : ''}`}>{fmt(funding1dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding7dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best7d === 'bybit' ? bestHighlight : ''}`}>{fmt(funding7dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding30dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best30d === 'bybit' ? bestHighlight : ''}`}>{fmt(funding30dBybit - bybitTxFee)}</td>
+                      <td className={`text-right py-2 px-3 font-mono ${(funding1yBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best1y === 'bybit' ? bestHighlight : ''}`}>{fmt(funding1yBybit - bybitTxFee)}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p className="text-xs text-slate-400 mt-2">Perpetual tx fees: Binance 0.04% × 2 (open+close), Bybit 0.055% × 2.</p>
+              <p className="text-xs text-slate-400 mt-2">Perpetual tx fees: Binance 0.04% × 2 (open+close), Bybit 0.055% × 2. <span className="text-amber-600 font-medium">Amber (1 day)</span> = row with highest 1-day PnL (all 4 rows). <span className="text-green-600 font-medium">Green (7d/30d/1y)</span> = best P&amp;L after fees between the two &quot;incl. fees&quot; rows.</p>
             </>
           );
         })()}
