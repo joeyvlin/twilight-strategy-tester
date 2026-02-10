@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell, AreaChart, Area } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, DollarSign, TrendingUp, AlertCircle, Wifi, WifiOff, Activity, Settings, Info, ArrowRight } from 'lucide-react';
 import { getFundingAverages, avgRateToAPR } from './utils/fundingAverages';
 
@@ -41,8 +41,12 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [lastBybitUpdate, setLastBybitUpdate] = useState(null);
 
   // Pool state (for Twilight funding rate calculation)
-  const [twilightLongSize, setTwilightLongSize] = useState(0);
-  const [twilightShortSize, setTwilightShortSize] = useState(0);
+  // Use slider-based control: total pool size + skew percentage
+  const [totalPoolSize, setTotalPoolSize] = useState(10000000); // $10M default
+  const [poolSkewPct, setPoolSkewPct] = useState(65); // 65% = 65% longs, 35% shorts (long-heavy)
+  // Computed long/short from sliders
+  const twilightLongSize = Math.round(totalPoolSize * (poolSkewPct / 100));
+  const twilightShortSize = Math.round(totalPoolSize * ((100 - poolSkewPct) / 100));
   // Twilight funding rate cap as % of Binance (0 = no cap). Step 1%, range 0–100.
   // When > 0, Twilight funding rate = this % of Binance FR (peg); 0 = use pool-based rate.
   const [twilightFundingCapPct, setTwilightFundingCapPct] = useState(0);
@@ -52,6 +56,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   const [useManualMode, setUseManualMode] = useState(false);
   const [selectedStrategy, setSelectedStrategy] = useState(null);
   const [tradeSize, setTradeSize] = useState(100); // Trade size for impact calculator
+  const [depthSliderValue, setDepthSliderValue] = useState(50); // Slider position 0-100% of max imbalance
 
   // Past 1y funding averages (static / localStorage / API)
   const [fundingAverages, setFundingAverages] = useState(null);
@@ -104,7 +109,6 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
         spotWs.onopen = () => {
           if (spotCancelledRef.current) return;
-          console.log('Connected to Binance Spot WebSocket');
           setIsSpotConnected(true);
         };
 
@@ -159,7 +163,6 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
         futuresWs.onopen = () => {
           if (futuresCancelledRef.current) return;
-          console.log('Connected to Binance Futures WebSocket');
           setIsFuturesConnected(true);
         };
 
@@ -213,7 +216,6 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
         markPriceWs.onopen = () => {
           if (markPriceCancelledRef.current) return;
-          console.log('Connected to Binance Mark Price WebSocket');
           setIsMarkPriceConnected(true);
         };
 
@@ -272,7 +274,6 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
 
         bybitWs.onopen = () => {
           if (bybitCancelledRef.current) return;
-          console.log('Connected to Bybit Inverse WebSocket');
           setIsBybitConnected(true);
 
           const subscribeMsg = { op: 'subscribe', args: ['tickers.BTCUSD'] };
@@ -309,14 +310,12 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               if (nextFunding) setBybitNextFundingTime(nextFunding);
             }
           } catch (e) {
-            console.log('Bybit WebSocket parse error:', e);
           }
         };
 
         bybitWs.onerror = () => { if (!bybitCancelledRef.current) setIsBybitConnected(false); };
         bybitWs.onclose = () => {
           if (bybitCancelledRef.current) return;
-          console.log('Bybit WebSocket closed, reconnecting in 5s...');
           setIsBybitConnected(false);
           if (bybitPingIntervalRef.current) clearInterval(bybitPingIntervalRef.current);
           bybitPingIntervalRef.current = null;
@@ -1938,27 +1937,44 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
               className="w-full px-2 py-1 border rounded text-sm"
             />
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 mb-1">Pool Long Size ($)</label>
+          <div className="col-span-2">
+            <label className="block text-xs text-slate-600 mb-1">
+              Total Pool Size: <span className="font-bold">${(totalPoolSize / 1000000).toFixed(1)}M</span>
+            </label>
             <input
-              type="number"
-              value={twilightLongSize}
-              onChange={(e) => setTwilightLongSize(Number(e.target.value))}
-              min={0}
-              step={100000}
-              className="w-full px-2 py-1 border rounded text-sm"
+              type="range"
+              min={1000000}
+              max={100000000}
+              step={1000000}
+              value={totalPoolSize}
+              onChange={(e) => setTotalPoolSize(Number(e.target.value))}
+              className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
             />
+            <div className="flex justify-between text-xs text-slate-400 mt-1">
+              <span>$1M</span>
+              <span>$100M</span>
+            </div>
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 mb-1">Pool Short Size ($)</label>
+          <div className="col-span-2">
+            <label className="block text-xs text-slate-600 mb-1">
+              Pool Skew: <span className={`font-bold ${poolSkewPct > 50 ? 'text-orange-600' : poolSkewPct < 50 ? 'text-blue-600' : 'text-green-600'}`}>
+                {poolSkewPct}% Longs / {100 - poolSkewPct}% Shorts
+              </span>
+            </label>
             <input
-              type="number"
-              value={twilightShortSize}
-              onChange={(e) => setTwilightShortSize(Number(e.target.value))}
-              min={0}
-              step={100000}
-              className="w-full px-2 py-1 border rounded text-sm"
+              type="range"
+              min={5}
+              max={95}
+              step={1}
+              value={poolSkewPct}
+              onChange={(e) => setPoolSkewPct(Number(e.target.value))}
+              className="w-full h-2 bg-gradient-to-r from-blue-400 via-green-400 to-orange-400 rounded-lg appearance-none cursor-pointer"
             />
+            <div className="flex justify-between text-xs text-slate-400 mt-1">
+              <span className="text-blue-500">Short Heavy</span>
+              <span className="text-green-500">Balanced</span>
+              <span className="text-orange-500">Long Heavy</span>
+            </div>
           </div>
           <div className="min-w-[20rem] rounded-lg border-2 border-amber-400 bg-amber-50 p-2 shadow-sm ring-2 ring-amber-200/50">
             <label className="block text-xs font-semibold text-amber-800 mb-1 whitespace-nowrap">Cap Twilight FR as a % of Binance FR</label>
@@ -2066,122 +2082,217 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         </div>
       </div>
 
-      {/* Cost to Balance Pool */}
+      {/* Cost to Balance Pool - Depth Chart */}
       <div className="bg-white rounded-lg p-4 shadow mb-6">
         <div className="flex items-center gap-2 mb-3">
           <DollarSign className="w-5 h-5 text-slate-600" />
           <h3 className="font-bold text-slate-800">Cost to Balance Pool</h3>
         </div>
         <p className="text-sm text-slate-600 mb-4">
-          To make long and short pool sizes equal, the admin would take a position on Twilight and hedge it on a CEX. Below: position to take, hedge side on each CEX, and funding P&amp;L over time (positive = profit, negative = cost).
+          Hover over the depth chart to see 30-day P&amp;L at different position sizes. The chart shows costs to balance the pool by taking a position on Twilight and hedging on a CEX.
         </p>
         {(() => {
-          const balancePositionSize = Math.abs(twilightLongSize - twilightShortSize);
-          const balanceDirection = twilightLongSize >= twilightShortSize ? 'SHORT' : 'LONG';
-          const hedgeSideBinance = balanceDirection === 'SHORT' ? 'LONG' : 'SHORT';
-          const hedgeSideBybit = balanceDirection === 'SHORT' ? 'LONG' : 'SHORT';
+          // Sanitize pool values to prevent NaN
+          const safeLongSize = Number(twilightLongSize) || 0;
+          const safeShortSize = Number(twilightShortSize) || 0;
+          const maxImbalance = Math.abs(safeLongSize - safeShortSize);
+          const balanceDirection = safeLongSize >= safeShortSize ? 'SHORT' : 'LONG';
+          const hedgeSide = balanceDirection === 'SHORT' ? 'LONG' : 'SHORT';
           const periodsPerDay = 3;
-          const netFundingPer8hBinance = balanceDirection === 'SHORT'
-            ? balancePositionSize * (twilightFundingRate - binanceFundingRate)
-            : balancePositionSize * (binanceFundingRate - twilightFundingRate);
-          const netFundingPer8hBybit = balanceDirection === 'SHORT'
-            ? balancePositionSize * (twilightFundingRate - bybitFundingRate)
-            : balancePositionSize * (bybitFundingRate - twilightFundingRate);
-          const funding1dBinance = netFundingPer8hBinance * periodsPerDay * 1;
-          const funding7dBinance = netFundingPer8hBinance * periodsPerDay * 7;
-          const funding30dBinance = netFundingPer8hBinance * periodsPerDay * 30;
-          const funding1yBinance = netFundingPer8hBinance * periodsPerDay * 365;
-          const funding1dBybit = netFundingPer8hBybit * periodsPerDay * 1;
-          const funding7dBybit = netFundingPer8hBybit * periodsPerDay * 7;
-          const funding30dBybit = netFundingPer8hBybit * periodsPerDay * 30;
-          const funding1yBybit = netFundingPer8hBybit * periodsPerDay * 365;
-          const binanceTxFee = 2 * balancePositionSize * BINANCE_TAKER_FEE;
-          const bybitTxFee = 2 * balancePositionSize * BYBIT_TAKER_FEE;
-          const binanceAfter1d = funding1dBinance - binanceTxFee;
-          const binanceAfter7d = funding7dBinance - binanceTxFee;
-          const binanceAfter30d = funding30dBinance - binanceTxFee;
-          const binanceAfter1y = funding1yBinance - binanceTxFee;
-          const bybitAfter1d = funding1dBybit - bybitTxFee;
-          const bybitAfter7d = funding7dBybit - bybitTxFee;
-          const bybitAfter30d = funding30dBybit - bybitTxFee;
-          const bybitAfter1y = funding1yBybit - bybitTxFee;
-          // Best for 1 day = row with highest 1-day PnL (compare all 4 rows)
-          const max1d = Math.max(funding1dBinance, binanceAfter1d, funding1dBybit, bybitAfter1d);
-          const isBest1dBinanceBefore = funding1dBinance >= max1d;
-          const isBest1dBinanceAfter = binanceAfter1d >= max1d;
-          const isBest1dBybitBefore = funding1dBybit >= max1d;
-          const isBest1dBybitAfter = bybitAfter1d >= max1d;
-          const best7d = binanceAfter7d >= bybitAfter7d ? 'binance' : 'bybit';
-          const best30d = binanceAfter30d >= bybitAfter30d ? 'binance' : 'bybit';
-          const best1y = binanceAfter1y >= bybitAfter1y ? 'binance' : 'bybit';
-          const bestHighlight = 'ring-2 ring-green-500 bg-green-100 font-semibold';
-          const bestHighlight1d = 'ring-2 ring-amber-500 bg-amber-100 font-semibold';
-          const fmt = (v) => (v >= 0 ? `+$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-          if (balancePositionSize === 0) {
+
+          if (maxImbalance === 0 || !isFinite(maxImbalance)) {
             return (
-              <p className="text-slate-500 italic">Pool is already balanced (long size = short size). No position needed.</p>
+              <p className="text-slate-500 italic">Pool is already balanced (long size = short size). Set different Long/Short sizes above to see depth chart.</p>
             );
           }
+
+          // Generate depth chart data - 30 data points from 0 to max imbalance
+          const depthData = [];
+          const numPoints = 30;
+          for (let i = 0; i <= numPoints; i++) {
+            const size = (maxImbalance * i) / numPoints;
+            const binanceFee = 2 * size * BINANCE_TAKER_FEE;
+            const bybitFee = 2 * size * BYBIT_TAKER_FEE;
+            const netBinance = balanceDirection === 'SHORT'
+              ? size * (twilightFundingRate - binanceFundingRate)
+              : size * (binanceFundingRate - twilightFundingRate);
+            const netBybit = balanceDirection === 'SHORT'
+              ? size * (twilightFundingRate - bybitFundingRate)
+              : size * (bybitFundingRate - twilightFundingRate);
+            const binanceVal = netBinance * periodsPerDay * 30 - binanceFee;
+            const bybitVal = netBybit * periodsPerDay * 30 - bybitFee;
+            depthData.push({
+              size: Math.round(size) || 0,
+              binance: isFinite(binanceVal) ? Number(binanceVal.toFixed(2)) : 0,
+              bybit: isFinite(bybitVal) ? Number(bybitVal.toFixed(2)) : 0,
+            });
+          }
+
+          // Full balance P&L for summary
+          const fullBinanceFee = 2 * maxImbalance * BINANCE_TAKER_FEE;
+          const fullBybitFee = 2 * maxImbalance * BYBIT_TAKER_FEE;
+          const fullNetBinance = balanceDirection === 'SHORT'
+            ? maxImbalance * (twilightFundingRate - binanceFundingRate)
+            : maxImbalance * (binanceFundingRate - twilightFundingRate);
+          const fullNetBybit = balanceDirection === 'SHORT'
+            ? maxImbalance * (twilightFundingRate - bybitFundingRate)
+            : maxImbalance * (bybitFundingRate - twilightFundingRate);
+          const full30dBinance = fullNetBinance * periodsPerDay * 30 - fullBinanceFee;
+          const full30dBybit = fullNetBybit * periodsPerDay * 30 - fullBybitFee;
+
+          const fmt = (v) => (v >= 0 ? `+$${Math.abs(v).toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`);
+
           return (
             <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-3 gap-3 mb-4">
                 <div className="bg-slate-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-500">Position on Twilight</div>
-                  <div className="font-bold text-slate-800">{balanceDirection} ${balancePositionSize.toLocaleString()}</div>
+                  <div className="text-xs text-slate-500">To Fully Balance</div>
+                  <div className="font-bold text-slate-800">{balanceDirection} ${maxImbalance.toLocaleString()}</div>
                 </div>
                 <div className="bg-orange-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-500">Hedge on Binance</div>
-                  <div className="font-bold text-orange-700">{hedgeSideBinance} ${balancePositionSize.toLocaleString()}</div>
+                  <div className="text-xs text-slate-500">Binance 30d P&L</div>
+                  <div className={`font-bold ${full30dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(full30dBinance)}</div>
                 </div>
                 <div className="bg-purple-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-500">Hedge on Bybit</div>
-                  <div className="font-bold text-purple-700">{hedgeSideBybit} ${balancePositionSize.toLocaleString()}</div>
+                  <div className="text-xs text-slate-500">Bybit 30d P&L</div>
+                  <div className={`font-bold ${full30dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(full30dBybit)}</div>
                 </div>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
-                  <thead>
-                    <tr className="bg-slate-100">
-                      <th className="text-left py-2 px-3 border-b border-slate-200">Hedging cost (funding P&amp;L)</th>
-                      <th className="text-right py-2 px-3 border-b border-slate-200">1 day</th>
-                      <th className="text-right py-2 px-3 border-b border-slate-200">7 days</th>
-                      <th className="text-right py-2 px-3 border-b border-slate-200">30 days</th>
-                      <th className="text-right py-2 px-3 border-b border-slate-200">1 year</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr className="bg-white">
-                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (before tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBinance >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBinanceBefore ? bestHighlight1d : ''}`}>{fmt(funding1dBinance)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBinance)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBinance)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBinance >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBinance)}</td>
-                    </tr>
-                    <tr className="bg-orange-50/30">
-                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Binance (incl. perpetual tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBinanceAfter ? bestHighlight1d : ''}`}>{fmt(funding1dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding7dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best7d === 'binance' ? bestHighlight : ''}`}>{fmt(funding7dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding30dBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best30d === 'binance' ? bestHighlight : ''}`}>{fmt(funding30dBinance - binanceTxFee)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${(funding1yBinance - binanceTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best1y === 'binance' ? bestHighlight : ''}`}>{fmt(funding1yBinance - binanceTxFee)}</td>
-                    </tr>
-                    <tr className="bg-white">
-                      <td className="py-2 px-3 border-b border-slate-100 text-slate-600">Bybit (before tx fees)</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1dBybit >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBybitBefore ? bestHighlight1d : ''}`}>{fmt(funding1dBybit)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding7dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding7dBybit)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding30dBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding30dBybit)}</td>
-                      <td className={`text-right py-2 px-3 border-b border-slate-100 font-mono ${funding1yBybit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(funding1yBybit)}</td>
-                    </tr>
-                    <tr className="bg-purple-50/30">
-                      <td className="py-2 px-3 text-slate-600">Bybit (incl. perpetual tx fees)</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding1dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${isBest1dBybitAfter ? bestHighlight1d : ''}`}>{fmt(funding1dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding7dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best7d === 'bybit' ? bestHighlight : ''}`}>{fmt(funding7dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding30dBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best30d === 'bybit' ? bestHighlight : ''}`}>{fmt(funding30dBybit - bybitTxFee)}</td>
-                      <td className={`text-right py-2 px-3 font-mono ${(funding1yBybit - bybitTxFee) >= 0 ? 'text-green-600' : 'text-red-600'} ${best1y === 'bybit' ? bestHighlight : ''}`}>{fmt(funding1yBybit - bybitTxFee)}</td>
-                    </tr>
-                  </tbody>
-                </table>
+
+              {/* Depth Chart */}
+              <div className="bg-slate-900 rounded-lg p-4 mb-4">
+                <div className="text-center text-slate-400 text-sm mb-2">
+                  30-Day P&L by Position Size (hover to see values)
+                </div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <AreaChart data={depthData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+                    <defs>
+                      <linearGradient id="depthBinance" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#f97316" stopOpacity={0.6}/>
+                        <stop offset="95%" stopColor="#f97316" stopOpacity={0.05}/>
+                      </linearGradient>
+                      <linearGradient id="depthBybit" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.6}/>
+                        <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0.05}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                    <XAxis
+                      dataKey="size"
+                      tick={{ fill: '#9ca3af', fontSize: 10 }}
+                      tickFormatter={(v) => v >= 1000 ? `$${(v/1000).toFixed(0)}k` : `$${v}`}
+                      label={{ value: 'Position Size', position: 'bottom', fill: '#9ca3af', fontSize: 11, dy: -5 }}
+                    />
+                    <YAxis
+                      tick={{ fill: '#9ca3af', fontSize: 10 }}
+                      tickFormatter={(v) => v >= 0 ? `+$${v}` : `-$${Math.abs(v)}`}
+                      label={{ value: '30d P&L', angle: -90, position: 'insideLeft', fill: '#9ca3af', fontSize: 11 }}
+                    />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }}
+                      labelStyle={{ color: '#fff', fontWeight: 'bold' }}
+                      formatter={(value, name) => {
+                        const numValue = Number(value) || 0;
+                        const formatted = numValue >= 0 ? `+$${numValue.toFixed(2)}` : `-$${Math.abs(numValue).toFixed(2)}`;
+                        return [formatted, name === 'binance' ? 'Binance Hedge' : 'Bybit Hedge'];
+                      }}
+                      labelFormatter={(label) => `Position: $${(Number(label) || 0).toLocaleString()} ${balanceDirection}`}
+                    />
+                    <ReferenceLine y={0} stroke="#6b7280" strokeWidth={2} />
+                    <Area
+                      type="monotone"
+                      dataKey="binance"
+                      stroke="#f97316"
+                      strokeWidth={2}
+                      fill="url(#depthBinance)"
+                      name="binance"
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="bybit"
+                      stroke="#8b5cf6"
+                      strokeWidth={2}
+                      fill="url(#depthBybit)"
+                      name="bybit"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+                <div className="flex justify-center gap-6 mt-2">
+                  <span className="text-orange-400 text-xs flex items-center gap-2">
+                    <span className="w-3 h-3 bg-orange-500 rounded"></span> Binance ({hedgeSide})
+                  </span>
+                  <span className="text-purple-400 text-xs flex items-center gap-2">
+                    <span className="w-3 h-3 bg-purple-500 rounded"></span> Bybit ({hedgeSide})
+                  </span>
+                </div>
+
+                {/* Interactive Slider */}
+                <div className="mt-4 px-2">
+                  <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                    <span>$0</span>
+                    <span className="text-white font-semibold">Drag to explore position sizes</span>
+                    <span>${maxImbalance.toLocaleString()}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={depthSliderValue}
+                    onChange={(e) => setDepthSliderValue(Number(e.target.value))}
+                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  {(() => {
+                    const selectedSize = Math.round((maxImbalance * depthSliderValue) / 100);
+                    const binanceFee = 2 * selectedSize * BINANCE_TAKER_FEE;
+                    const bybitFee = 2 * selectedSize * BYBIT_TAKER_FEE;
+                    const netBinance = balanceDirection === 'SHORT'
+                      ? selectedSize * (twilightFundingRate - binanceFundingRate)
+                      : selectedSize * (binanceFundingRate - twilightFundingRate);
+                    const netBybit = balanceDirection === 'SHORT'
+                      ? selectedSize * (twilightFundingRate - bybitFundingRate)
+                      : selectedSize * (bybitFundingRate - twilightFundingRate);
+                    const binancePnL = netBinance * periodsPerDay * 30 - binanceFee;
+                    const bybitPnL = netBybit * periodsPerDay * 30 - bybitFee;
+                    return (
+                      <div className="mt-3 grid grid-cols-3 gap-3 text-center">
+                        <div className="bg-slate-800 rounded-lg p-3">
+                          <div className="text-slate-400 text-xs">Position Size</div>
+                          <div className="text-white font-bold text-lg">${selectedSize.toLocaleString()}</div>
+                          <div className="text-slate-500 text-xs">{balanceDirection} on Twilight</div>
+                        </div>
+                        <div className="bg-slate-800 rounded-lg p-3 border border-orange-500/30">
+                          <div className="text-orange-400 text-xs">Binance 30d P&L</div>
+                          <div className={`font-bold text-lg ${binancePnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {binancePnL >= 0 ? '+' : ''}{fmt(binancePnL)}
+                          </div>
+                          <div className="text-slate-500 text-xs">{hedgeSide} hedge</div>
+                        </div>
+                        <div className="bg-slate-800 rounded-lg p-3 border border-purple-500/30">
+                          <div className="text-purple-400 text-xs">Bybit 30d P&L</div>
+                          <div className={`font-bold text-lg ${bybitPnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {bybitPnL >= 0 ? '+' : ''}{fmt(bybitPnL)}
+                          </div>
+                          <div className="text-slate-500 text-xs">{hedgeSide} hedge</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
-              <p className="text-xs text-slate-400 mt-2">Perpetual tx fees: Binance 0.04% × 2 (open+close), Bybit 0.055% × 2. <span className="text-amber-600 font-medium">Amber (1 day)</span> = row with highest 1-day PnL (all 4 rows). <span className="text-green-600 font-medium">Green (7d/30d/1y)</span> = best P&amp;L after fees between the two &quot;incl. fees&quot; rows.</p>
+
+              {/* Recommendation */}
+              <div className={`rounded-lg p-3 ${full30dBinance >= full30dBybit ? 'bg-orange-100 border border-orange-300' : 'bg-purple-100 border border-purple-300'}`}>
+                <div className="text-sm">
+                  <span className="font-semibold">
+                    {full30dBinance >= full30dBybit ? '🏆 Binance' : '🏆 Bybit'} is the better hedge
+                  </span>
+                  {' '}for full balance ({balanceDirection} ${maxImbalance.toLocaleString()} on Twilight, {hedgeSide} on CEX).
+                  <span className={full30dBinance >= 0 || full30dBybit >= 0 ? 'text-green-700 font-semibold' : 'text-red-700'}>
+                    {' '}30-day P&L: {fmt(Math.max(full30dBinance, full30dBybit))}
+                  </span>
+                </div>
+              </div>
             </>
           );
         })()}
