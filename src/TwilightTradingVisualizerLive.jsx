@@ -1925,7 +1925,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
           <Settings className="w-5 h-5 text-slate-600" />
           <h3 className="font-bold text-slate-800">Test Parameters</h3>
         </div>
-        <div className="flex flex-wrap items-start gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <div>
             <label className="block text-xs text-slate-600 mb-1">TVL ($)</label>
             <input
@@ -1977,17 +1977,16 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
             </div>
           </div>
           <div className="min-w-[20rem] rounded-lg border-2 border-amber-400 bg-amber-50 p-2 shadow-sm ring-2 ring-amber-200/50">
-            <label className="block text-xs font-semibold text-amber-800 mb-1 whitespace-nowrap">Cap Twilight FR as a % of Binance FR</label>
+            <label className="block text-xs font-semibold text-amber-800 mb-1 whitespace-nowrap">Cap Twilight FR as a % of Binance FR (0% = pool-based rate)</label>
             <select
               value={twilightFundingCapPct}
               onChange={(e) => setTwilightFundingCapPct(Number(e.target.value))}
               className="w-full px-2 py-1.5 border-2 border-amber-300 rounded bg-white text-sm font-medium text-slate-800"
             >
-              {Array.from({ length: 101 }, (_, i) => 100 - i).map((pct) => (
+              {Array.from({ length: 101 }, (_, i) => i).map((pct) => (
                 <option key={pct} value={pct}>{pct}%</option>
               ))}
             </select>
-            <p className="text-xs text-amber-700 mt-1">0% = pool-based rate; &gt;0% = Twilight FR = this % of Binance FR</p>
           </div>
           <div className="bg-white rounded-lg p-3 shadow border-2 border-blue-200 shrink-0 ml-2">
             <div className="text-xs text-slate-500">Twilight Funding (8h)</div>
