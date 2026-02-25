@@ -4,6 +4,7 @@ import { ArrowUpRight, ArrowDownRight, DollarSign, TrendingUp, AlertCircle, Wifi
 import { getFundingAverages, avgRateToAPR } from './utils/fundingAverages';
 import { buildSpreadStrategies } from './strategies/spreadStrategies';
 import { SpreadStrategiesTable } from './components/SpreadStrategiesTable';
+import { LendingPoolSection } from './components/LendingPoolSection';
 
 const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // ===================
@@ -526,7 +527,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // STRATEGY GENERATION
   // ===================
 
-  const generateStrategies = useMemo(() => {
+  const generateStrategiesResult = useMemo(() => {
     const strategies = [];
     const btcPrice = twilightPrice;
     const maxPositionUSD = tvl; // Max position value limited by TVL
@@ -1681,8 +1682,23 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
     spreadStrategiesBuilt.forEach((s) => strategies.push(s));
     id += spreadStrategiesBuilt.length;
 
-    return strategies.sort((a, b) => b.apy - a.apy);
+    const getPerpHedgeMetrics = (opts) => calculateStrategyAPY({
+      twilightPosition: opts.position,
+      twilightSize: opts.size,
+      twilightLeverage: opts.leverage,
+      binancePosition: null,
+      binanceSize: 0,
+      binanceLeverage: 0,
+    });
+
+    return {
+      strategies: strategies.sort((a, b) => b.apy - a.apy),
+      getPerpHedgeMetrics,
+    };
   }, [twilightPrice, cexPrice, spread, binanceFundingRate, twilightFundingRate, tvl, currentSkew, currentTwilightAPY, bybitPrice, bybitFundingRate]);
+
+  const generateStrategies = generateStrategiesResult.strategies;
+  const getPerpHedgeMetricsForLending = generateStrategiesResult.getPerpHedgeMetrics;
 
   // Memoize chart data so BarChart gets stable reference (avoids new array every render → less Recharts churn)
   const strategyChartData = useMemo(
@@ -1693,6 +1709,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
   // Sync selectedStrategy to current strategies so we don't retain previous strategy array in memory
   useEffect(() => {
     if (!selectedStrategy) return;
+    if (selectedStrategy.isLendingPoolStrategy) return; // Lending pool strategies live in LendingPoolSection
     const current = generateStrategies.find((s) => s.id === selectedStrategy.id);
     if (current && current !== selectedStrategy) {
       setSelectedStrategy(current);
@@ -1734,6 +1751,7 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
       case 'Dual Arb': return 'bg-cyan-100 text-cyan-800';
       case 'Bybit Inverse': return 'bg-violet-100 text-violet-800';
       case 'Spread': return 'bg-teal-100 text-teal-800';
+      case 'Lending Pool': return 'bg-amber-100 text-amber-800';
       default: return 'bg-gray-100 text-gray-800';
     }
   };
@@ -2502,6 +2520,19 @@ const TwilightTradingVisualizerLive = ({ onNavigateToCEX }) => {
         getCategoryColor={getCategoryColor}
         getRiskColor={getRiskColor}
         getAPYColor={getAPYColor}
+      />
+
+      <LendingPoolSection
+        btcPrice={twilightPrice}
+        tvl={tvl}
+        getPerpHedgeMetrics={getPerpHedgeMetricsForLending}
+        selectedStrategy={selectedStrategy}
+        onSelectStrategy={setSelectedStrategy}
+        getTtmApr={getTtmApr}
+        getCategoryColor={getCategoryColor}
+        getRiskColor={getRiskColor}
+        getAPYColor={getAPYColor}
+        baseUrl="https://relayer.twilight.rest/api"
       />
 
       {/* LONG Twilight Strategies Table */}
